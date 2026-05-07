@@ -4,6 +4,86 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.1] — 2026-05-07
+
+**`lsp_uri_decode(uri)` — percent-decoding for `file://` URIs.**
+
+cyim-lsp 1.0–1.2.0 stripped `file://` with a direct byte-7 slice
+and passed the result verbatim to `plugin_buf_load_file`. Files
+with spaces / non-ASCII / percent-encoded paths failed to load
+(the OS open() got the raw `%20` etc. bytes). v1.2.1 adds
+`lsp_uri_decode(uri)` — a public bundle helper that materializes
+a real filesystem path from any RFC 3986–conformant
+percent-encoded URI.
+
+This is a **real bundle source change** at 1.2.x — the first
+since 1.0.3. Previous 1.1.0 / 1.2.0 cuts updated only the
+example glue.
+
+Closes cyim's
+[F-CO-4 from the v1.5.2 closeout audit](https://github.com/MacCracken/cyim/blob/main/docs/audit/2026-05-07-1.5x-closeout.md)
+and the matching deferred LSP polish item from cyim's roadmap.
+
+### Added — `[lib]` bundle (`src/lsp_position.cyr`)
+
+- `lsp_uri_decode(uri)` — public helper. Decodes `%XX` hex escapes
+  (case-insensitive); literal-passes malformed sequences (`%XY`
+  where `X` or `Y` isn't hex), truncated trailers (`%X` at EOL,
+  bare `%` at EOL). Returns a fresh heap cstring; caller doesn't
+  free (lifetime convention matches `lsp_path_to_uri`,
+  `lsp_pos_extract_uri`).
+- `_lsp_hex_digit(c)` — internal helper. Returns 0–15 for hex
+  digit; -1 otherwise. Used by `lsp_uri_decode`.
+
+### Changed — `docs/examples/cyim_glue.cyr`
+
+- `_cyim_lsp_ex_goto_def(s)` cross-file branch — was
+  `var dest_path = dest_uri + 7;`. Now wraps in
+  `lsp_uri_decode(dest_uri + 7)`; surfaces a status message on
+  decode failure (alloc only — malformed decodes literal-pass).
+- `_cyim_lsp_on_ref_select(s, idx)` — same change for the refs
+  quickfix on-select path.
+- Header comment updated: `lsp_uri_decode` listed in the bundle
+  helpers consumed.
+
+### Tests
+
+- `tests/lsp_position.tcyr` — 38 → 54 assertions (+16 across 13
+  new test groups: passthrough, %20 → space, %2F → /, hex
+  case-insensitivity, ASCII letters, UTF-8 multi-byte sequence,
+  malformed `%XY`, malformed `%2X`, truncated `%X`, bare `%`,
+  empty input, NULL input, mixed escapes + literals).
+- `cyrius test` — 6 suites, **190 assertions PASS** (was 174 at
+  1.2.0; +16 uri_decode cases).
+- `cyrius fuzz` — 1 PASS.
+- `cyrius lint` — 0 warnings.
+- `dist/cyim-lsp.cyr` regenerated, **2305 lines** (was 2228 at
+  1.2.0; +77 lines = `_lsp_hex_digit` + `lsp_uri_decode` +
+  comment block).
+
+### Verification path (cyim 1.5.3+ pickup)
+
+When cyim picks up this version via `[deps.cyim-lsp].tag = "1.2.1"`
+and updates `src/plugins/lsp_glue.cyr` to call `lsp_uri_decode`,
+the cross-file goto-def + refs quickfix flows handle paths like:
+
+- `file:///home/user/projects/my%20stuff/main.cyr` (space)
+- `file:///home/user/caf%C3%A9/menu.cyr` (UTF-8 'é')
+- `file:///foo%2Fbar.cyr` (encoded slash)
+
+Without the fix, the OS open() saw `my%20stuff` as a literal
+directory name and returned `ENOENT`. With it, real path bytes
+hit the kernel.
+
+### Limitations (still deferred)
+
+- **Reference previews** — labels show `filename:line:col` only;
+  no source-line preview. cyim's `plugin_list_display` doesn't
+  expose a preview pane (would be cyim 1.6+ work).
+- **Cross-window navigation** — selecting a ref switches the
+  active buffer's window. cyim-side multi-window navigation
+  (e.g. open in split) is a future cyim ABI extension.
+
 ## [1.2.0] — 2026-05-07
 
 **`:lsp-find-refs` / `gr` becomes a navigable quickfix picker.**

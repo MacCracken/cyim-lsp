@@ -5,6 +5,15 @@
 
 ## Version
 
+**1.2.1** — `lsp_uri_decode(uri)` shipped 2026-05-07. First
+real `[lib]` bundle source change since 1.0.3 — closes cyim's
+F-CO-4 closeout finding (URL-encoded `file://` URIs failed
+cross-file goto-def / refs quickfix). Public helper in
+`src/lsp_position.cyr`; reference glue in
+`docs/examples/cyim_glue.cyr` calls it from the cross-file
+branches. 16 new test assertions; 190 total. Distfile 2228 →
+2305 lines (+77).
+
 **1.2.0** — `:lsp-find-refs` / `gr` becomes a navigable quickfix
 picker shipped 2026-05-07. `[lib]` bundle source unchanged across
 1.0–1.2 series; dist regenerated with 1.2.0 banner.
@@ -181,10 +190,11 @@ Direct (declared in `cyrius.cyml`):
 
 | Consumer | Status |
 |---|---|
-| cyim 1.5.1+ | **planned pickup** — the cyim-lsp 1.2.0 reference glue activates `:lsp-find-refs` / `gr` as a navigable quickfix picker via cyim 1.5.0's `plugin_list_display` ABI. Cyim 1.5.0 was just shipped; the consumer-side bump (`[deps.cyim-lsp].tag = "1.2.0"`) plus copying the updated `docs/examples/cyim_glue.cyr` lands as cyim 1.5.1. |
-| cyim 1.4.3 / 1.5.0 | shipped against cyim-lsp 1.1.0 reference glue (gd/gr keymap + cross-file goto-def; refs surface only count in status bar); upgrade path: bump `[deps.cyim-lsp].tag` to 1.2.0 + copy updated glue |
-| cyim 1.4.0–1.4.2 | shipped against cyim-lsp 1.0.2/1.0.3 reference glue (gd/gr stubs; cross-file deferred); two-step upgrade path |
-| cyim 1.3.x | not applicable (no plugin pickup) |
+| cyim 1.5.3+ | **planned pickup** — the cyim-lsp 1.2.1 release adds `lsp_uri_decode` to the bundle. cyim 1.5.3 picks it up + closes F-CO-4 (URL-decode for `file://` URIs). |
+| cyim 1.5.1 / 1.5.2 | shipped against cyim-lsp 1.2.0; gd/gr/refs-quickfix all work but URL-encoded paths fail. Upgrade path: bump `[deps.cyim-lsp].tag` to 1.2.1 + sync `src/plugins/lsp_glue.cyr` cross-file branches to use `lsp_uri_decode`. |
+| cyim 1.4.3 / 1.5.0 | shipped against cyim-lsp 1.1.0 reference glue (gd/gr keymap + cross-file goto-def; refs surface only count in status bar). |
+| cyim 1.4.0–1.4.2 | shipped against cyim-lsp 1.0.2/1.0.3 reference glue (gd/gr stubs; cross-file deferred). |
+| cyim 1.3.x | not applicable (no plugin pickup). |
 
 ## Next
 

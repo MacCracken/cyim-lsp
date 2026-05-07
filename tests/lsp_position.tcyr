@@ -112,6 +112,68 @@ fn main() {
     var ln3 = lsp_pos_extract_first_line(resp_empty, strlen(resp_empty));
     assert_eq(ln3, 0 - 1, "no line -> -1");
 
+    # === v1.2.1 — lsp_uri_decode ===
+
+    test_group("uri_decode: passthrough when no escapes");
+    var d1 = lsp_uri_decode("file:///abs/path.cyr");
+    assert_eq(_streq(d1, "file:///abs/path.cyr"), 1, "no-escape passthrough");
+
+    test_group("uri_decode: %20 -> space");
+    var d2 = lsp_uri_decode("file:///foo%20bar.cyr");
+    assert_eq(_streq(d2, "file:///foo bar.cyr"), 1, "%20 decoded to space");
+
+    test_group("uri_decode: %2F -> /");
+    var d3 = lsp_uri_decode("file:///a%2Fb.cyr");
+    assert_eq(_streq(d3, "file:///a/b.cyr"), 1, "%2F decoded to slash");
+
+    test_group("uri_decode: hex case-insensitivity");
+    var d4 = lsp_uri_decode("%2f%2F%2a%2A");
+    assert_eq(_streq(d4, "//**"), 1, "lower + upper hex both decode");
+
+    test_group("uri_decode: ASCII letter via %41 / %61");
+    var d5 = lsp_uri_decode("%41%61");
+    assert_eq(_streq(d5, "Aa"), 1, "%41=A %61=a");
+
+    test_group("uri_decode: UTF-8 byte via percent-encoding");
+    # 'é' in UTF-8 is 0xC3 0xA9.
+    var d6 = lsp_uri_decode("caf%C3%A9");
+    var expected6_b0 = load8(d6 + 0);
+    var expected6_b3 = load8(d6 + 3);
+    var expected6_b4 = load8(d6 + 4);
+    var expected6_b5 = load8(d6 + 5);
+    assert_eq(expected6_b0, 99, "byte 0 = 'c'");
+    assert_eq(expected6_b3, 195, "byte 3 = 0xC3");
+    assert_eq(expected6_b4, 169, "byte 4 = 0xA9");
+    assert_eq(expected6_b5, 0, "NUL terminator at byte 5");
+
+    test_group("uri_decode: malformed %XY (X not hex) keeps literal '%'");
+    var d7 = lsp_uri_decode("a%ZZb");
+    assert_eq(_streq(d7, "a%ZZb"), 1, "%ZZ kept literal");
+
+    test_group("uri_decode: malformed %2X (Y not hex) keeps literal '%'");
+    var d8 = lsp_uri_decode("a%2Zb");
+    assert_eq(_streq(d8, "a%2Zb"), 1, "%2Z kept literal");
+
+    test_group("uri_decode: truncated %X at end -> literal '%X'");
+    var d9 = lsp_uri_decode("foo%2");
+    assert_eq(_streq(d9, "foo%2"), 1, "truncated %2 kept literal");
+
+    test_group("uri_decode: bare % at end -> literal '%'");
+    var d10 = lsp_uri_decode("foo%");
+    assert_eq(_streq(d10, "foo%"), 1, "bare trailing % kept literal");
+
+    test_group("uri_decode: empty input -> empty cstring");
+    var d11 = lsp_uri_decode("");
+    assert_eq(_streq(d11, ""), 1, "empty input -> empty output");
+
+    test_group("uri_decode: NULL input -> 0");
+    var d12 = lsp_uri_decode(0);
+    assert_eq(d12, 0, "null input -> null return");
+
+    test_group("uri_decode: mixed escapes + literals");
+    var d13 = lsp_uri_decode("/path/to/foo%20bar%2Fbaz.cyr");
+    assert_eq(_streq(d13, "/path/to/foo bar/baz.cyr"), 1, "mixed encoding decoded");
+
     return assert_summary();
 }
 
