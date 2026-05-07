@@ -1,0 +1,123 @@
+# tests/lsp_diags.tcyr — diagnostic state + bytescan (v0.5.0)
+#
+# Exercises src/lsp_diags.cyr's pure helpers + state operations
+# without depending on a live cyrius-lsp:
+#   - bytescan (find, count_pattern, extract_uri)
+#   - state map (lookup / get_or_create / reset)
+#   - frame handler (publishDiagnostics dispatch)
+#   - status_segment formatter
+#
+# Hooks themselves get integration-tested at cyim 1.4.0 pickup.
+
+include "src/jsonrpc.cyr"
+include "src/subprocess.cyr"
+include "src/lsp_client.cyr"
+include "src/lsp_state.cyr"
+include "src/lsp_diags.cyr"
+
+fn _streq(a, b) {
+    var i = 0;
+    while (1 == 1) {
+        var ca = load8(a + i);
+        var cb = load8(b + i);
+        if (ca != cb) { return 0; }
+        if (ca == 0) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    lsp_diags_init();
+
+    test_group("_lsp_diags_count_pattern counts non-overlapping occurrences");
+    var s = "\"severity\":1 \"severity\":2 \"severity\":1 \"severity\":1";
+    assert_eq(_lsp_diags_count_pattern(s, strlen(s), "\"severity\":1"), 3, "three :1 patterns");
+    assert_eq(_lsp_diags_count_pattern(s, strlen(s), "\"severity\":2"), 1, "one :2");
+    assert_eq(_lsp_diags_count_pattern(s, strlen(s), "\"severity\":3"), 0, "no :3");
+    assert_eq(_lsp_diags_count_pattern("", 0, "x"), 0, "empty buf -> 0");
+
+    test_group("_lsp_diags_extract_uri pulls URI from a publishDiagnostics body");
+    var body1 = "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"file:///foo.cyr\",\"diagnostics\":[]}}";
+    var u = _lsp_diags_extract_uri(body1, strlen(body1));
+    assert_neq(u, 0, "extract returned non-null");
+    assert_eq(_streq(u, "file:///foo.cyr"), 1, "URI matches");
+
+    test_group("_lsp_diags_extract_uri returns 0 when no uri marker");
+    var no_uri = "{\"method\":\"something/else\"}";
+    assert_eq(_lsp_diags_extract_uri(no_uri, strlen(no_uri)), 0, "no marker -> 0");
+
+    test_group("lsp_diags_handle_frame dispatches publishDiagnostics");
+    var pd_body = "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"file:///bar.cyr\",\"diagnostics\":[{\"severity\":1,\"message\":\"err1\"},{\"severity\":1,\"message\":\"err2\"},{\"severity\":2,\"message\":\"warn1\"}]}}";
+    var rc = lsp_diags_handle_frame(pd_body, strlen(pd_body));
+    assert_eq(rc, 1, "handle returns 1 (publishDiagnostics)");
+    var entry = lsp_diags_lookup("file:///bar.cyr");
+    assert_neq(entry, 0, "URI registered after handle");
+    assert_eq(lsp_diags_count(entry, 1), 2, "2 errors");
+    assert_eq(lsp_diags_count(entry, 2), 1, "1 warning");
+    assert_eq(lsp_diags_count(entry, 3), 0, "0 info");
+    assert_eq(lsp_diags_count(entry, 4), 0, "0 hint");
+
+    test_group("lsp_diags_handle_frame ignores non-publishDiagnostics frames");
+    var other = "{\"jsonrpc\":\"2.0\",\"method\":\"window/logMessage\",\"params\":{}}";
+    assert_eq(lsp_diags_handle_frame(other, strlen(other)), 0, "logMessage -> 0");
+
+    test_group("publishDiagnostics REPLACES prior state for same URI");
+    var pd_clean = "{\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"file:///bar.cyr\",\"diagnostics\":[]}}";
+    lsp_diags_handle_frame(pd_clean, strlen(pd_clean));
+    var entry2 = lsp_diags_lookup("file:///bar.cyr");
+    assert_eq(lsp_diags_count(entry2, 1), 0, "errors cleared after empty array");
+    assert_eq(lsp_diags_count(entry2, 2), 0, "warnings cleared");
+
+    test_group("multi-URI: each gets its own counts");
+    var pd_a = "{\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"file:///a.cyr\",\"diagnostics\":[{\"severity\":1}]}}";
+    var pd_b = "{\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"file:///b.cyr\",\"diagnostics\":[{\"severity\":3},{\"severity\":3},{\"severity\":3}]}}";
+    lsp_diags_handle_frame(pd_a, strlen(pd_a));
+    lsp_diags_handle_frame(pd_b, strlen(pd_b));
+    var ea = lsp_diags_lookup("file:///a.cyr");
+    var eb = lsp_diags_lookup("file:///b.cyr");
+    assert_eq(lsp_diags_count(ea, 1), 1, "a: 1 error");
+    assert_eq(lsp_diags_count(eb, 3), 3, "b: 3 infos");
+
+    test_group("lsp_diags_format_status: omits zero categories");
+    var fmt_buf[64];
+    var entry_only_err = lsp_diags_lookup("file:///a.cyr");
+    var n = lsp_diags_format_status(entry_only_err, &fmt_buf, 64);
+    assert_eq(n, 3, "'E:1' = 3 bytes");
+    assert_eq(load8(&fmt_buf), 69, "byte 0 = 'E'");
+    assert_eq(load8(&fmt_buf + 1), 58, "byte 1 = ':'");
+    assert_eq(load8(&fmt_buf + 2), 49, "byte 2 = '1'");
+    assert_eq(load8(&fmt_buf + 3), 0, "NUL terminated");
+
+    test_group("lsp_diags_format_status: multi-category with spaces");
+    var entry_b = lsp_diags_lookup("file:///b.cyr");
+    # b has only infos (3 of them) — should be "I:3"
+    var fmt_buf2[64];
+    var n2 = lsp_diags_format_status(entry_b, &fmt_buf2, 64);
+    assert_eq(n2, 3, "'I:3' = 3 bytes");
+    assert_eq(_streq(&fmt_buf2, "I:3"), 1, "exact 'I:3'");
+
+    test_group("lsp_diags_format_status: zero counts return 0");
+    var pd_empty = "{\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"file:///clean.cyr\",\"diagnostics\":[]}}";
+    lsp_diags_handle_frame(pd_empty, strlen(pd_empty));
+    var entry_clean = lsp_diags_lookup("file:///clean.cyr");
+    var fmt_buf3[64];
+    var n3 = lsp_diags_format_status(entry_clean, &fmt_buf3, 64);
+    assert_eq(n3, 0, "no diags -> 0 bytes (omitted segment)");
+
+    test_group("lsp_diags_format_status: full E+W+I+H");
+    # Build an entry with all 4 severity categories populated.
+    var pd_full = "{\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"file:///full.cyr\",\"diagnostics\":[{\"severity\":1},{\"severity\":2},{\"severity\":2},{\"severity\":3},{\"severity\":4},{\"severity\":4},{\"severity\":4}]}}";
+    lsp_diags_handle_frame(pd_full, strlen(pd_full));
+    var ef = lsp_diags_lookup("file:///full.cyr");
+    var fmt_buf4[64];
+    var n4 = lsp_diags_format_status(ef, &fmt_buf4, 64);
+    assert_eq(_streq(&fmt_buf4, "E:1 W:2 I:1 H:3"), 1, "exact 'E:1 W:2 I:1 H:3'");
+    assert_eq(n4, 15, "byte count matches");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

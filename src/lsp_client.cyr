@@ -194,7 +194,89 @@ fn _lsp_initialize() {
     var notif = jsonrpc_build_notification("initialized", "{}");
     if (notif == 0) { return 0 - 1; }
     if (_lsp_send_all(notif) != 0) { return 0 - 1; }
+    # v0.5.0: switch the read fd to non-blocking so the periodic
+    # frame drain (called from cyim's diagnostic_provider hook
+    # per render frame) can return immediately when no server-
+    # pushed notifications are waiting. The handshake above used
+    # blocking reads — once the protocol is established and the
+    # only inbound traffic is async notifications (publishDiagnostics
+    # etc.), non-blocking is the right mode.
+    lsp_proc_set_nonblock(_lsp_proc);
     return 0;
+}
+
+# Drain available frames from the server. Reads bytes non-blocking,
+# accumulates into a buffer, parses complete frames as they arrive,
+# and dispatches each to `handler_fp(body_ptr, body_len)`. Stops
+# when the read fd has no more bytes available right now (EAGAIN).
+#
+# Returns the number of frames successfully dispatched. -1 on
+# unrecoverable error (alloc / read).
+#
+# Buffer management: 16 KB scratch per call. Frames larger than
+# that get rejected by jsonrpc_parse_frame's incomplete-buffer
+# branch — same cap as the v0.3.0 _lsp_recv_frame; v0.5.x can
+# grow if real-world diagnostics push past it.
+fn _lsp_drain_frames(handler_fp) {
+    if (_lsp_proc == 0) { return 0; }
+    var cap = 16384;
+    var buf = alloc(cap);
+    if (buf == 0) { return 0 - 1; }
+    var total = 0;
+    var dispatched = 0;
+    var go = 1;
+    while (go == 1) {
+        if (total >= cap) { go = 0; }
+        if (go == 1) {
+            var n = lsp_proc_recv_nb(_lsp_proc, buf + total, cap - total);
+            if (n == 0 - 2) {
+                # EAGAIN: no more data right now. Try parsing
+                # what we have, then exit.
+                go = 0;
+            }
+            if (n == 0) {
+                # EOF: server exited; bail.
+                return dispatched;
+            }
+            if (n < 0) {
+                if (n != 0 - 2) { return 0 - 1; }
+            }
+            if (n > 0) { total = total + n; }
+        }
+        # Parse + dispatch every complete frame in [0, total).
+        var parse_more = 1;
+        while (parse_more == 1) {
+            var off_slot[8];
+            store64(&off_slot, 0);
+            var len_slot[8];
+            store64(&len_slot, 0);
+            var rc = jsonrpc_parse_frame(buf, total, &off_slot, &len_slot);
+            if (rc == 1) {
+                var body_off = load64(&off_slot);
+                var body_len = load64(&len_slot);
+                fncall2(handler_fp, buf + body_off, body_len);
+                dispatched = dispatched + 1;
+                # Shift remaining bytes left; we may have started
+                # the next frame's header.
+                var remaining = total - (body_off + body_len);
+                if (remaining > 0) {
+                    var i = 0;
+                    while (i < remaining) {
+                        store8(buf + i, load8(buf + body_off + body_len + i));
+                        i = i + 1;
+                    }
+                }
+                total = remaining;
+            }
+            if (rc != 1) { parse_more = 0; }
+            if (rc == 0 - 1) {
+                # Malformed: drop the buffer to recover. Future
+                # bytes start fresh.
+                total = 0;
+            }
+        }
+    }
+    return dispatched;
 }
 
 # Send `shutdown` request, await response, then send `exit`

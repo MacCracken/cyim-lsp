@@ -154,3 +154,43 @@ fn lsp_proc_kill(proc) {
     # SIGTERM = 15
     return sys_kill(pid, 15);
 }
+
+# Set O_NONBLOCK on the read pipe (parent reads child stdout).
+# Called by lsp_client.cyr at the end of the initialize handshake
+# so subsequent reads can return -EAGAIN instead of blocking. The
+# write fd stays blocking (we always intend to send our entire
+# message; partial-write handling lives in `_lsp_send_all` already).
+#
+# Constants: F_GETFL = 3, F_SETFL = 4, O_NONBLOCK = 2048 (Linux).
+# SYS_FCNTL = 72 from syscalls_x86_64_linux.cyr.
+#
+# Returns 0 on success, -1 on fcntl failure.
+fn lsp_proc_set_nonblock(proc) {
+    if (proc == 0) { return 0 - 1; }
+    var pid = load64(proc);
+    if (pid < 0) { return 0 - 1; }
+    var read_fd = load64(proc + 8);
+    var flags = syscall(72, read_fd, 3, 0);   # F_GETFL
+    if (flags < 0) { return 0 - 1; }
+    var rc = syscall(72, read_fd, 4, flags | 2048);   # F_SETFL | O_NONBLOCK
+    if (rc < 0) { return 0 - 1; }
+    return 0;
+}
+
+# Non-blocking read variant. Like lsp_proc_recv but returns:
+#   > 0  bytes read
+#   = 0  EOF (child exited / closed stdout)
+#   = -2 EAGAIN — no data ready right now (caller drains later)
+#   = -1 unrecoverable error
+#
+# Requires lsp_proc_set_nonblock to have been called first.
+fn lsp_proc_recv_nb(proc, buf, max) {
+    if (proc == 0) { return 0 - 1; }
+    var pid = load64(proc);
+    if (pid < 0) { return 0 - 1; }
+    var n = sys_read(load64(proc + 8), buf, max);
+    if (n >= 0) { return n; }
+    # Linux's read(O_NONBLOCK) returns -EAGAIN (-11) when no data.
+    if (n == 0 - 11) { return 0 - 2; }
+    return 0 - 1;
+}

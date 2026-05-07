@@ -129,20 +129,37 @@ diagnostic_provider hook).
   with range) is a perf optimisation; lands when buffers get
   large enough to bite.
 
-### M4 — Diagnostics (v0.5.0) — **cyim 1.4.0 pickup target**
+### M4 — Diagnostics (v0.5.0) — ✅ shipped 2026-05-06 — **cyim 1.4.0 pickup target**
 
-**Acceptance:** edit a .cyr file with a syntax error, see
-diagnostics in cyim's status segment + (eventually) inline.
+- `lsp_proc_set_nonblock` + `lsp_proc_recv_nb` in subprocess.cyr
+  (fcntl-based O_NONBLOCK).
+- `_lsp_drain_frames(handler_fp)` in lsp_client.cyr — reads
+  bytes non-blocking, parses + dispatches every complete frame
+  in one call, stops on EAGAIN.
+- `src/lsp_diags.cyr` — per-URI 48 B entries with severity
+  counts; bytescan-based publishDiagnostics parser
+  (`_lsp_diags_find`, `_lsp_diags_count_pattern`,
+  `_lsp_diags_extract_uri`); replaces prior state per URI on
+  each notification.
+- `_cyim_lsp_status_segment` in plugin_init.cyr drains pending
+  frames + renders "E:N W:M I:K H:L" from active buffer's
+  URI counts.
+- `tests/lsp_diags.tcyr` — 28 assertions covering bytescan,
+  state map, replace semantics, format renderer.
 
-- Receive `textDocument/publishDiagnostics` notifications from
-  the server
-- Per-URI diag map: line, severity, message
-- diagnostic_provider hook: walk the map for the active buffer,
-  push entries into the out_vec via cyim's `diag_new()`
-- status_segment hook: render `E:N W:M I:K` from the per-buffer
-  diag count (omitted when all zero)
-- Tests: drive a scripted publishDiagnostics through the
-  framing layer, verify cyim-side diag map state
+**Deferred to v0.5.1**:
+- **Inline diag highlighting via diagnostic_provider hook.**
+  Needs per-diag extraction (line + message + severity) from
+  publishDiagnostics; v0.5.0 only counts severities. Rendering
+  in cyim happens via `diag_new(line, severity, msg)` pushes
+  into the out_vec.
+- **Drain placement.** v0.5.0 drains in status_segment hook
+  (fires every render frame); v0.5.1 may move to
+  diagnostic_provider (fires earlier in the same frame).
+- **JSON parser refactor.** v0.5.0 bytescans for speed +
+  zero-stdlib-dep in hot path; if a future server formats
+  publishDiagnostics in a way that breaks bytescan, refactor
+  to use cyrius's `json_parse`.
 
 ### M5 — Navigation (v0.6.0)
 
@@ -208,8 +225,8 @@ references list.
 
 ## Last updated
 
-2026-05-06 — v0.4.0 shipped (M3, document sync). Plugin hooks
-route changes / saves into LSP notifications. M4 (diagnostics,
-v0.5.0) is the next session-scoped chunk + the **cyim 1.4.0
-pickup target** — first version where cyim-lsp delivers
-user-visible value.
+2026-05-06 — v0.5.0 shipped (M4, diagnostics) — **cyim 1.4.0
+pickup target met**. publishDiagnostics → per-URI severity
+counts → cyim status segment "E:N W:M I:K H:L". v0.5.1
+(inline diag highlighting via diagnostic_provider hook) is
+the next chunk; v0.6.0 (definition / references) follows.

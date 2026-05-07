@@ -4,6 +4,129 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-05-06
+
+M4 — diagnostics. **cyim 1.4.0 pickup target.** First version
+where cyim-lsp delivers user-visible value: open a `.cyr` file
+in cyim, edit it with a syntax error, and the status line shows
+"E:N W:M I:K H:L" reflecting cyrius-lsp's `publishDiagnostics`.
+
+The diag-count rendering is delivered via the `status_segment`
+hook (cyim ADR 0004 surface). Inline per-line highlighting via
+the `diagnostic_provider` hook lands at v0.5.1 — needs per-line
+extraction from the publishDiagnostics body, which is structurally
+larger than v0.5.0's count-only bytescan.
+
+### Added
+
+- **`src/lsp_diags.cyr`** (220 lines) — per-URI diagnostic state.
+  - `lsp_diags_handle_frame(body, body_len)` — recognises
+    `textDocument/publishDiagnostics` notifications, extracts
+    URI, counts severities by bytescan (`"severity":1` etc.).
+    Replaces prior state for the same URI per LSP §3.7.4.
+  - `lsp_diags_lookup(uri)` / `lsp_diags_count(entry, severity)`
+    — O(N) URI lookup; severity counts read from a 48 B
+    per-URI entry.
+  - `lsp_diags_format_status(entry, out_buf, cap)` — renders
+    "E:N W:M I:K H:L" omitting zero categories. Returns 0
+    bytes when all four are zero (status line stays clean).
+  - Bytescan helpers (`_lsp_diags_find`,
+    `_lsp_diags_count_pattern`, `_lsp_diags_extract_uri`) —
+    no json stdlib dependency for the hot path; LSP message
+    structure is well-defined enough that bytescan is fast +
+    correct against cyrius-lsp output.
+- **`lsp_proc_set_nonblock(proc)`** in `src/subprocess.cyr` —
+  fcntl-based `O_NONBLOCK` set on the read fd. Called at end of
+  `_lsp_initialize` so subsequent reads can return without
+  blocking.
+- **`lsp_proc_recv_nb(proc, buf, max)`** in `src/subprocess.cyr` —
+  non-blocking recv variant. Returns -2 on EAGAIN (no data
+  ready), 0 on EOF, > 0 bytes read.
+- **`_lsp_drain_frames(handler_fp)`** in `src/lsp_client.cyr` —
+  reads bytes non-blocking, accumulates into a 16 KB scratch
+  buffer, parses every complete LSP frame, dispatches each to
+  `handler_fp(body_ptr, body_len)`. Stops when EAGAIN. Handles
+  multi-frame batches in one call (server may send didOpen
+  response + publishDiagnostics back-to-back).
+- **`tests/lsp_diags.tcyr`** (180 lines, 28 assertions across
+  11 groups). Coverage: bytescan severity counts (3-of-4 cases,
+  empty buffer), URI extract success + failure, frame dispatch
+  for publishDiagnostics + ignore for other methods, state
+  REPLACES on subsequent publishDiagnostics for same URI,
+  multi-URI independence, status_segment formatting (3 single-
+  category cases + zero-count case + full E+W+I+H case).
+
+### Changed
+
+- **`src/lsp_client.cyr:_lsp_initialize`** — calls
+  `lsp_proc_set_nonblock(_lsp_proc)` at the end so subsequent
+  drain calls don't block. Handshake itself stays blocking
+  (we need the response).
+- **`src/plugin_init.cyr:_cyim_lsp_status_segment`** — was a
+  no-op stub; now drains pending frames, looks up the active
+  buffer's URI in lsp_diags' map, formats counts via
+  `lsp_diags_format_status`. Returns the rendered cstring or
+  0 (omit segment).
+- **`cyrius.cyml [lib].modules`** order extended:
+  `... lsp_state.cyr → lsp_documents.cyr → lsp_diags.cyr →
+  plugin_init.cyr`. lsp_diags references lsp_client's frame
+  drain helper but not the document-sync side (those touch
+  cyim's plugin ABI), so it slots between lsp_documents and
+  plugin_init.
+
+### Tests
+
+- `cyrius test` — 6 suites (was 5): cyim-lsp.tcyr 2,
+  jsonrpc.tcyr 21, subprocess.tcyr 15, lsp_documents.tcyr 39,
+  **lsp_diags.tcyr 28** (new), src/test.cyr 5. Total 110
+  assertions, all PASS.
+- `cyrius fuzz` 1 harness PASS.
+- `cyrius lint` 0 warnings.
+
+### Notes
+
+- **Inline diag highlighting deferred to v0.5.1.** v0.5.0's
+  `_cyim_lsp_diagnostic_provider` callback stays no-op; only
+  status_segment shows diag info. Rendering per-line markers
+  needs per-diag extraction (line / message / severity) from
+  the publishDiagnostics body, which the v0.5.0 bytescan only
+  counts.
+- **Drain happens at status_segment time.** v0.5.0 drains in
+  `_cyim_lsp_status_segment` since that's the one hook that's
+  reliably called every render frame. v0.5.1 will move this
+  to `diagnostic_provider` (which fires earlier in the same
+  frame) once that hook does real work.
+- **Bytescan is fragile against whitespace variations and
+  string escapes within URIs.** cyrius-lsp's actual output
+  uses the canonical message shape, so this works in practice.
+  If a future server formats publishDiagnostics differently,
+  refactor to use json stdlib's `json_parse` for the message
+  body.
+- **Frame buffer 16 KB.** Larger publishDiagnostics (huge
+  files with many errors) may exceed this; v0.5.x can grow
+  if real-world output bites.
+- **dist/cyim-lsp.cyr** grew 1278 → 1737 lines (+459).
+
+### cyim 1.4.0 readiness
+
+cyim 1.4.0 picks up cyim-lsp v0.5.0 with these surface
+guarantees:
+
+1. `cyim_lsp_init()` registers six callbacks on cyim's plugin
+   ABI (frozen at cyim ADR 0004); five do real work, one
+   (diagnostic_provider) is no-op until v0.5.1.
+2. Opening / editing / saving a `.cyr` file in cyim auto-spawns
+   cyrius-lsp (via `/usr/bin/env cyrius-lsp` PATH lookup),
+   sends didOpen + didChange / didSave, and surfaces server-
+   pushed diagnostic counts in cyim's status row.
+3. Plugin degrades cleanly if cyrius-lsp isn't on PATH —
+   lazy-start fails silently and all subsequent hooks no-op.
+
+cyim 1.4.0's pickup is a 2-line cyim-side change:
+`[plugins.cyim-lsp]` block in `cyrius.cyml` + `include
+"lib/cyim-lsp.cyr"` in `src/main.cyr` + `cyim_lsp_init()` call
+in `main()` after `plugin_init()`.
+
 ## [0.4.0] — 2026-05-06
 
 M3 — document sync. cyim-lsp now actually does its job: the

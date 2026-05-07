@@ -5,15 +5,15 @@
 
 ## Version
 
-**0.4.0** — M3 (document sync) shipped 2026-05-06. cyim-lsp
-now sends didOpen / didChange / didSave to cyrius-lsp; the
-plugin's six hooks have real behaviour for the three v0.4.0
-ones (post_save, post_change, ex_command for `:lsp-restart` /
-`:lsp-status` still stubs). M4 (diagnostics) is the next
-session-scoped chunk and the cyim-1.4.0 pickup target.
+**0.5.0** — M4 (diagnostics) shipped 2026-05-06. **cyim 1.4.0
+pickup target.** Server-pushed `publishDiagnostics` →
+per-URI severity counts → cyim status segment "E:N W:M I:K
+H:L". Inline diag highlighting (diagnostic_provider hook) is
+v0.5.1.
 
-**0.3.0** — M2 (subprocess lifecycle): spawn + initialize +
-shutdown verified against real cyrius-lsp.
+**0.4.0** — M3 (document sync): didOpen / didChange / didSave.
+
+**0.3.0** — M2 (subprocess lifecycle).
 
 **0.2.0** — M1 (JSON-RPC framing).
 
@@ -57,6 +57,11 @@ shutdown verified against real cyrius-lsp.
   builders, lazy-start, didOpen sender. References cyim plugin
   ABI (`editor_buf`, `editor_file_path`, `buf_len`, `buf_get`)
   — only resolves at fold-in into cyim.
+- **`src/lsp_diags.cyr` — per-URI diagnostic state (v0.5.0)**.
+  Public: `lsp_diags_handle_frame`, `lsp_diags_lookup`,
+  `lsp_diags_count`, `lsp_diags_format_status`. Bytescan-based
+  publishDiagnostics parser; 48 B per-URI entry with severity
+  counts. No json stdlib dependency in hot path.
 - `src/plugin_init.cyr` — `cyim_lsp_init()` registers six no-op
   callbacks against cyim's plugin ABI; ex_commands
   `:lsp-restart` / `:lsp-status` registered. normal_key
@@ -81,12 +86,15 @@ shutdown verified against real cyrius-lsp.
   edge cases (v0.2.0)
 - `tests/subprocess.tcyr` — 15 assertions, /bin/cat mock
   round-trip (v0.3.0)
-- **`tests/lsp_documents.tcyr` — 39 assertions across 10
-  groups, all PASS (v0.4.0).** Coverage: 7 short escapes + 3
-  \u escapes + 3 printable passthroughs + URI prepend + 7
-  .cyr filter cases + 4 itoa cases + exact-JSON shape for the
-  three message-body builders (didOpen / didChange / didSave)
-  + lsp_state vec lookup / create / version-bump.
+- `tests/lsp_documents.tcyr` — 39 assertions, doc-sync helpers
+  (v0.4.0)
+- **`tests/lsp_diags.tcyr` — 28 assertions across 11 groups,
+  all PASS (v0.5.0).** Coverage: bytescan severity counts,
+  URI extract success / failure, frame dispatch for
+  publishDiagnostics + ignore for other methods, state
+  REPLACES on subsequent publishDiagnostics, multi-URI
+  independence, status_segment format (omits zero categories,
+  full E+W+I+H rendering).
 - `fuzz/jsonrpc.fcyr` — random byte feeder; 5000 buffers PASS
   (v0.2.0)
 - `tests/cyim-lsp.bcyr` — benchmark stub (no-op)
@@ -116,9 +124,13 @@ exercised by the v0.1.0 stubs.
 
 ## Next
 
-M4 (v0.5.0 — diagnostics) is the next session-scoped chunk per
-[`roadmap.md`](roadmap.md). Receive `textDocument/publishDiagnostics`
-from the server, store per-URI diag map, surface entries through
-the cyim `diagnostic_provider` hook + `status_segment` count.
-**v0.5.0 is the cyim 1.4.0 pickup target** — first version where
-cyim-lsp delivers user-visible value.
+**v0.5.0 is the cyim 1.4.0 pickup target.** From cyim's side:
+`[plugins.cyim-lsp]` block in `cyrius.cyml` + `include
+"lib/cyim-lsp.cyr"` in `src/main.cyr` + `cyim_lsp_init()` call
+in `main()` after `plugin_init()`. Two-line change picks up
+auto-spawn + status-segment diag counts.
+
+After cyim 1.4.0 ships, cyim-lsp's M5 (v0.5.1 — inline diag
+highlighting via `diagnostic_provider` hook) is the next
+chunk — needs per-line extraction from the publishDiagnostics
+body. Then v0.6.0 (definition / references via `gd` / `gr`).

@@ -1,0 +1,308 @@
+# lsp_diags.cyr — per-URI diagnostic state (v0.5.0)
+#
+# Receives `textDocument/publishDiagnostics` notifications from
+# the server, stores per-URI severity counts, and renders a
+# status-segment summary like "E:3 W:1".
+#
+# v0.5.0 scope: severity counts only. Individual diagnostic line
+# / message extraction (for cyim's diagnostic_provider hook →
+# inline render) is v0.5.1's scope. The status_segment showing
+# "LSP error count" is the cyim 1.4.0 pickup target — first
+# user-visible signal that cyim-lsp is working.
+#
+# Public surface:
+#   lsp_diags_init()                       -> 0
+#   lsp_diags_handle_frame(body, body_len) -> 1 if publishDiagnostics
+#                                             handled, 0 otherwise
+#   lsp_diags_lookup(uri)                  -> entry ptr or 0
+#   lsp_diags_count(entry, severity)       -> i64 count
+#   lsp_diags_format_status(entry, out_buf, cap)
+#                                          -> bytes written
+#
+# Per-URI entry layout (48 B):
+#   +0   uri_ptr        (NUL-term cstring)
+#   +8   count_error    (severity 1 in LSP)
+#   +16  count_warning  (severity 2)
+#   +24  count_info     (severity 3)
+#   +32  count_hint     (severity 4)
+#   +40  reserved       (future: list-of-diags ptr for v0.5.1)
+#
+# LSP severity values per LSP §3.7.4:
+#   1 = Error
+#   2 = Warning
+#   3 = Information
+#   4 = Hint
+
+var _lsp_diags_table = 0;
+
+fn lsp_diags_init() {
+    if (_lsp_diags_table == 0) { _lsp_diags_table = vec_new(); }
+    return 0;
+}
+
+# Compare a NUL-term cstring `a` against bytes [b, b+blen).
+# Returns 1 on byte equality, 0 otherwise.
+fn _lsp_diags_str_eq_range(a, b, blen) {
+    var al = strlen(a);
+    if (al != blen) { return 0; }
+    var i = 0;
+    while (i < blen) {
+        if (load8(a + i) != load8(b + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Lookup entry by URI cstring. Returns entry or 0 on miss.
+fn lsp_diags_lookup(uri) {
+    if (_lsp_diags_table == 0) { return 0; }
+    var n = vec_len(_lsp_diags_table);
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(_lsp_diags_table, i);
+        if (e != 0) {
+            var eu = load64(e);
+            if (eu != 0) {
+                if (_lsp_diags_str_eq_range(uri, eu, strlen(eu)) == 1) {
+                    return e;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Create / find an entry for `uri`. URI is duplicated onto heap
+# so caller can free / replace its own buffer.
+fn _lsp_diags_get_or_create(uri) {
+    if (_lsp_diags_table == 0) { lsp_diags_init(); }
+    var existing = lsp_diags_lookup(uri);
+    if (existing != 0) { return existing; }
+    var ul = strlen(uri);
+    var uri_dup = alloc(ul + 1);
+    if (uri_dup == 0) { return 0; }
+    var i = 0;
+    while (i < ul) { store8(uri_dup + i, load8(uri + i)); i = i + 1; }
+    store8(uri_dup + ul, 0);
+    var e = alloc(48);
+    if (e == 0) { return 0; }
+    store64(e,      uri_dup);
+    store64(e + 8,  0);
+    store64(e + 16, 0);
+    store64(e + 24, 0);
+    store64(e + 32, 0);
+    store64(e + 40, 0);
+    vec_push(_lsp_diags_table, e);
+    return e;
+}
+
+# Reset severity counts on an entry (used when publishDiagnostics
+# arrives — a new notification REPLACES the prior diag set per
+# LSP §3.7.4).
+fn _lsp_diags_reset(entry) {
+    if (entry == 0) { return 0; }
+    store64(entry + 8,  0);
+    store64(entry + 16, 0);
+    store64(entry + 24, 0);
+    store64(entry + 32, 0);
+    return 0;
+}
+
+# Public count accessor. severity is 1..4; out-of-range returns 0.
+fn lsp_diags_count(entry, severity) {
+    if (entry == 0) { return 0; }
+    if (severity == 1) { return load64(entry + 8); }
+    if (severity == 2) { return load64(entry + 16); }
+    if (severity == 3) { return load64(entry + 24); }
+    if (severity == 4) { return load64(entry + 32); }
+    return 0;
+}
+
+# === Bytescan helpers ===
+#
+# v0.5.0 doesn't pull the json stdlib parser into the LSP
+# message hot path — JSON-RPC messages from cyrius-lsp have a
+# well-defined shape and bytescanning the few literals we need
+# is O(N) and avoids parser dependencies. The trade-off:
+# bytescan is fragile against whitespace variations and string
+# escapes within URIs. Real cyrius-lsp output doesn't use
+# either, so it works in practice. If a future server breaks
+# this assumption, refactor to use json_parse.
+
+# Find the next occurrence of `needle` (NUL-term) in
+# `[buf+from, buf+blen)`. Returns the offset within `buf` or -1.
+fn _lsp_diags_find(buf, blen, from, needle) {
+    var nl = strlen(needle);
+    if (nl == 0) { return from; }
+    var i = from;
+    while (i + nl <= blen) {
+        var hit = 1;
+        var j = 0;
+        while (j < nl) {
+            if (load8(buf + i + j) != load8(needle + j)) {
+                hit = 0;
+                j = nl;
+            }
+            j = j + 1;
+        }
+        if (hit == 1) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# Count occurrences of `needle` in `[buf, buf+blen)`. Used for
+# severity counts: count `"severity":1` etc.
+fn _lsp_diags_count_pattern(buf, blen, needle) {
+    var count = 0;
+    var nl = strlen(needle);
+    if (nl == 0) { return 0; }
+    var i = 0;
+    while (i + nl <= blen) {
+        var hit = _lsp_diags_find(buf, blen, i, needle);
+        if (hit < 0) { return count; }
+        count = count + 1;
+        i = hit + nl;
+    }
+    return count;
+}
+
+# Extract the URI from a publishDiagnostics body. Looks for
+# `"uri":"` and reads until the next `"`. Returns a heap-alloc'd
+# cstring or 0 on failure.
+fn _lsp_diags_extract_uri(buf, blen) {
+    var marker = "\"uri\":\"";
+    var pos = _lsp_diags_find(buf, blen, 0, marker);
+    if (pos < 0) { return 0; }
+    var start = pos + 7;   # past the marker
+    # Find closing quote — assumes URIs don't contain unescaped
+    # quotes (file:/// paths don't, by spec).
+    var end = start;
+    var go = 1;
+    while (go == 1) {
+        if (end >= blen) { return 0; }
+        if (load8(buf + end) == 34) { go = 0; }
+        if (go == 1) { end = end + 1; }
+    }
+    var ul = end - start;
+    var out = alloc(ul + 1);
+    if (out == 0) { return 0; }
+    var i = 0;
+    while (i < ul) {
+        store8(out + i, load8(buf + start + i));
+        i = i + 1;
+    }
+    store8(out + ul, 0);
+    return out;
+}
+
+# === Public: handle a single inbound frame ===
+
+# Returns 1 if the frame was a publishDiagnostics and we updated
+# state; 0 otherwise (other notification kinds get ignored at
+# v0.5.0).
+fn lsp_diags_handle_frame(body, body_len) {
+    var method_marker = "\"method\":\"textDocument/publishDiagnostics\"";
+    if (_lsp_diags_find(body, body_len, 0, method_marker) < 0) {
+        return 0;
+    }
+    var uri = _lsp_diags_extract_uri(body, body_len);
+    if (uri == 0) { return 0; }
+    var entry = _lsp_diags_get_or_create(uri);
+    if (entry == 0) { return 0; }
+    _lsp_diags_reset(entry);
+    var c1 = _lsp_diags_count_pattern(body, body_len, "\"severity\":1");
+    var c2 = _lsp_diags_count_pattern(body, body_len, "\"severity\":2");
+    var c3 = _lsp_diags_count_pattern(body, body_len, "\"severity\":3");
+    var c4 = _lsp_diags_count_pattern(body, body_len, "\"severity\":4");
+    store64(entry + 8,  c1);
+    store64(entry + 16, c2);
+    store64(entry + 24, c3);
+    store64(entry + 32, c4);
+    return 1;
+}
+
+# === Status segment formatter ===
+#
+# Render "E:n W:m I:k H:l" into `out_buf` (heap, caller-owned).
+# Categories with zero count are omitted. Returns bytes written
+# (excluding trailing NUL); 0 if all four counts are zero.
+#
+# Used by the status_segment plugin hook. Returning 0 (no segment)
+# tells cyim's render layer to omit the divider — the segment
+# only appears when there are actual diagnostics.
+
+fn _lsp_diags_itoa_into(n, dst, off) {
+    if (n == 0) {
+        store8(dst + off, 48);
+        return off + 1;
+    }
+    # Reverse-fill via a temp buffer.
+    var tmp[24];
+    var tlen = 0;
+    var v = n;
+    while (v > 0) {
+        store8(&tmp + tlen, 48 + (v - (v / 10) * 10));
+        v = v / 10;
+        tlen = tlen + 1;
+    }
+    var i = 0;
+    while (i < tlen) {
+        store8(dst + off + i, load8(&tmp + tlen - 1 - i));
+        i = i + 1;
+    }
+    return off + tlen;
+}
+
+fn _lsp_diags_emit_cat(label, n, dst, off, written_any) {
+    if (n == 0) { return off; }
+    if (written_any > 0) {
+        store8(dst + off, 32);   # space
+        off = off + 1;
+    }
+    var ll = strlen(label);
+    var i = 0;
+    while (i < ll) {
+        store8(dst + off + i, load8(label + i));
+        i = i + 1;
+    }
+    off = off + ll;
+    return _lsp_diags_itoa_into(n, dst, off);
+}
+
+fn lsp_diags_format_status(entry, out_buf, cap) {
+    if (entry == 0) { return 0; }
+    if (cap < 32) { return 0; }
+    var e = load64(entry + 8);
+    var w = load64(entry + 16);
+    var i = load64(entry + 24);
+    var h = load64(entry + 32);
+    if (e == 0) {
+        if (w == 0) {
+            if (i == 0) {
+                if (h == 0) { return 0; }
+            }
+        }
+    }
+    var off = 0;
+    var any = 0;
+    if (e > 0) {
+        off = _lsp_diags_emit_cat("E:", e, out_buf, off, any);
+        any = 1;
+    }
+    if (w > 0) {
+        off = _lsp_diags_emit_cat("W:", w, out_buf, off, any);
+        any = 1;
+    }
+    if (i > 0) {
+        off = _lsp_diags_emit_cat("I:", i, out_buf, off, any);
+        any = 1;
+    }
+    if (h > 0) {
+        off = _lsp_diags_emit_cat("H:", h, out_buf, off, any);
+        any = 1;
+    }
+    store8(out_buf + off, 0);
+    return off;
+}

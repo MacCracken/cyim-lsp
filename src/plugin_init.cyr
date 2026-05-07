@@ -46,15 +46,41 @@ fn _cyim_lsp_post_change(s) {
     return lsp_doc_did_change(s);
 }
 
+# Static buffer for the status-segment cstring. cyim's render
+# layer reads this byte-by-byte once per frame, so the buffer
+# can be reused — no need to alloc a fresh cstring per call.
+# 64 bytes accommodates "E:NNN W:NNN I:NNN H:NNN" with margin.
+var _cyim_lsp_status_buf[64];
+
 fn _cyim_lsp_status_segment(s) {
-    # TODO v0.2.0: format "E:N W:M I:K" from accumulated diagnostics.
-    # v0.1.0 returns 0 (no segment) so the status line stays clean.
-    return 0;
+    # v0.5.0: drain pending publishDiagnostics, then look up the
+    # active buffer's URI in lsp_diags' map and format counts.
+    # Lazy-drain: the diag map only updates from server-pushed
+    # notifications, so we drain at the start of each render
+    # frame's status pass. (diagnostic_provider fires earlier in
+    # the same frame for inline-paint integration in v0.5.1+; for
+    # v0.5.0 we drain here since diagnostic_provider stays no-op.)
+    if (lsp_client_running() != 0) {
+        _lsp_drain_frames(&lsp_diags_handle_frame);
+    }
+    var path = editor_file_path(s);
+    if (path == 0) { return 0; }
+    var uri = _lsp_path_to_uri(path);
+    if (uri == 0) { return 0; }
+    var entry = lsp_diags_lookup(uri);
+    if (entry == 0) { return 0; }
+    var n = lsp_diags_format_status(entry, &_cyim_lsp_status_buf, 64);
+    if (n == 0) { return 0; }
+    return &_cyim_lsp_status_buf;
 }
 
 fn _cyim_lsp_diagnostic_provider(s, b, out_vec) {
-    # TODO v0.2.0: push collected publishDiagnostics entries from
+    # v0.5.1: push collected publishDiagnostics entries from
     # cyrius-lsp into out_vec via diag_new(line, severity, msg).
+    # v0.5.0 keeps this no-op — counts are surfaced via
+    # status_segment. Inline diag highlighting needs per-line
+    # extraction (line numbers + messages from the publishDiagnostics
+    # body), which lands in v0.5.1.
     return 0;
 }
 
