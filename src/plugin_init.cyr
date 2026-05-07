@@ -126,23 +126,83 @@ fn _cyim_lsp_diagnostic_provider(s, b, out_vec) {
 }
 
 fn _cyim_lsp_gd(s) {
-    # TODO v0.2.0: textDocument/definition; jump cursor to result.
+    # v0.6.0: would call lsp_nav_goto_def(s) but cyim's
+    # plugin-prefix-keymap ABI for `g`-prefix sequences (`g d`)
+    # isn't wired through plugin_register_normal_key yet — that's
+    # cyim 1.4.x work. v0.6.0 ships navigation via the
+    # `:lsp-goto-def` ex-command (see _cyim_lsp_ex_goto_def
+    # below). This callback stays a stub for now; will activate
+    # once cyim's prefix-keymap dispatch lands.
     return ACT_NONE;
 }
 
 fn _cyim_lsp_gr(s) {
-    # TODO v0.2.0: textDocument/references; populate quickfix list.
+    # See _cyim_lsp_gd above — same cyim ABI gap. Use
+    # `:lsp-find-refs` ex-command instead.
     return ACT_NONE;
 }
 
 fn _cyim_lsp_ex_restart(s) {
-    # TODO v0.2.0: kill + respawn cyrius-lsp subprocess.
+    # v0.6.0: kill + respawn the cyrius-lsp subprocess. Useful
+    # when the server is in a bad state or after upgrading
+    # cyrius itself. Re-runs the initialize handshake so cyim
+    # remains attached after restart.
+    if (lsp_client_running() == 0) {
+        # Not running — just start.
+        if (lsp_client_start_default() == 0) {
+            editor_set_status(s, "lsp: started", 12);
+            return 0;
+        }
+        editor_set_status(s, "lsp: start failed", 17);
+        return 0 - 1;
+    }
+    lsp_client_stop();
+    if (lsp_client_start_default() == 0) {
+        editor_set_status(s, "lsp: restarted", 14);
+        return 0;
+    }
+    editor_set_status(s, "lsp: restart failed", 19);
+    return 0 - 1;
+}
+
+# Static buffer for :lsp-status output.
+var _cyim_lsp_status_msg[64];
+
+fn _cyim_lsp_ex_status(s) {
+    # v0.6.0: print server status — pid + attached/detached.
+    # v0.6.x can extend with capability summary + open document
+    # count once those are tracked.
+    var d = lsp_client_describe();
+    var dl = strlen(d);
+    var prefix = "lsp: ";
+    var pl = strlen(prefix);
+    if (pl + dl > 63) { dl = 63 - pl; }
+    var i = 0;
+    while (i < pl) {
+        store8(&_cyim_lsp_status_msg + i, load8(prefix + i));
+        i = i + 1;
+    }
+    var j = 0;
+    while (j < dl) {
+        store8(&_cyim_lsp_status_msg + pl + j, load8(d + j));
+        j = j + 1;
+    }
+    store8(&_cyim_lsp_status_msg + pl + dl, 0);
+    editor_set_status(s, &_cyim_lsp_status_msg, pl + dl);
     return 0;
 }
 
-fn _cyim_lsp_ex_status(s) {
-    # TODO v0.2.0: print server status (pid, capabilities, doc count).
-    return 0;
+# v0.6.0: navigation ex-commands. `:lsp-goto-def` and
+# `:lsp-find-refs` route through lsp_documents' navigation
+# handlers. Ex-command form chosen because cyim's
+# plugin-prefix-keymap ABI for `g d` / `g r` isn't yet wired.
+
+fn _cyim_lsp_ex_goto_def(s) {
+    return lsp_nav_goto_def(s);
+}
+
+fn _cyim_lsp_ex_find_refs(s) {
+    return lsp_nav_find_refs(s);
 }
 
 # Public entry point — called from cyim's main() after plugin_init()
@@ -163,5 +223,8 @@ fn cyim_lsp_init() {
     # For v0.1.0 we register only the ex-commands.
     plugin_register_ex_command("lsp-restart", &_cyim_lsp_ex_restart);
     plugin_register_ex_command("lsp-status",  &_cyim_lsp_ex_status);
+    # v0.6.0: navigation ex-commands.
+    plugin_register_ex_command("lsp-goto-def",  &_cyim_lsp_ex_goto_def);
+    plugin_register_ex_command("lsp-find-refs", &_cyim_lsp_ex_find_refs);
     return 0;
 }

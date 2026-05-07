@@ -1,0 +1,154 @@
+# lsp_position.cyr — buffer position helpers + Location parser (v0.6.0)
+#
+# LSP works in line / character coordinates (LSP §3.7);
+# cyim works in byte offsets within a gap buffer. This file
+# converts between them and parses LSP `Location` /
+# `LocationLink` response shapes.
+#
+# Public surface (frozen for v0.6.x):
+#   _lsp_pos_offset_to_lc(b, off, line_out, char_out) -> 0
+#   _lsp_pos_lc_to_offset(b, line, character)         -> i64 offset
+#   _lsp_pos_extract_uri(body, blen)                  -> cstring or 0
+#   _lsp_pos_extract_first_line(body, blen)           -> i64 line or -1
+#   _lsp_pos_extract_first_character(body, blen)      -> i64 char or -1
+#
+# Position helpers reference cyim's plugin ABI surface (`buf_get`,
+# `buf_len`) — they only resolve at fold-in. Stub at standalone-
+# test time same as lsp_documents.cyr.
+#
+# The Location-parser helpers don't reference cyim ABI; they just
+# bytescan. Testable standalone.
+
+# === Position conversions ===
+#
+# Convert a byte offset to (line, character) by counting newlines
+# from the start of the buffer. line is 0-indexed for LSP output;
+# character is bytes-from-start-of-line (cyim is byte-oriented;
+# UTF-16 code-unit conversion per LSP spec is deferred — most
+# code is ASCII, where bytes == characters).
+#
+# Writes to *line_out and *char_out via store64. Returns 0
+# always (no failure modes; out-of-range offsets just return
+# the line/character at buffer end).
+
+fn _lsp_pos_offset_to_lc(b, off, line_out, char_out) {
+    if (b == 0) {
+        store64(line_out, 0);
+        store64(char_out, 0);
+        return 0;
+    }
+    var blen = buf_len(b);
+    if (off > blen) { off = blen; }
+    var line = 0;
+    var ch = 0;
+    var i = 0;
+    while (i < off) {
+        if (buf_get(b, i) == 10) {
+            line = line + 1;
+            ch = 0;
+        }
+        if (buf_get(b, i) != 10) {
+            ch = ch + 1;
+        }
+        i = i + 1;
+    }
+    store64(line_out, line);
+    store64(char_out, ch);
+    return 0;
+}
+
+# Convert (line, character) to a byte offset. line is 0-indexed
+# (LSP convention). character is byte offset from start of line.
+# Returns the offset; clamped to [0, buf_len].
+
+fn _lsp_pos_lc_to_offset(b, line, character) {
+    if (b == 0) { return 0; }
+    var blen = buf_len(b);
+    var off = 0;
+    var current_line = 0;
+    var go = 1;
+    while (go == 1) {
+        if (current_line >= line) { go = 0; }
+        if (off >= blen) { go = 0; }
+        if (go == 1) {
+            if (buf_get(b, off) == 10) {
+                current_line = current_line + 1;
+            }
+            off = off + 1;
+        }
+    }
+    # off now points at start of `line`. Add character.
+    var target = off + character;
+    if (target > blen) { target = blen; }
+    return target;
+}
+
+# === Location response parsing ===
+#
+# textDocument/definition response shapes (LSP §3.10.7):
+#   - Location:      {"uri":"...","range":{"start":{"line":N,"character":M},"end":...}}
+#   - Location[]:    array of the above (peek the first)
+#   - LocationLink[]: similar with targetUri / targetRange (post-3.14)
+#
+# v0.6.0 supports Location and Location[] (peeks the first
+# entry). LocationLink and the empty/null result get treated as
+# "not found".
+#
+# `_lsp_pos_extract_uri(body, blen)` finds `"uri":"..."` and
+# returns the URI as a fresh cstring. (Same shape as
+# lsp_diags's `_lsp_diags_extract_uri` but lives here so
+# navigation doesn't depend on the diags module.)
+
+fn _lsp_pos_extract_uri(body, blen) {
+    var marker = "\"uri\":\"";
+    var pos = _lsp_diags_find(body, blen, 0, marker);
+    if (pos < 0) { return 0; }
+    var start = pos + 7;
+    var end = start;
+    var go = 1;
+    while (go == 1) {
+        if (end >= blen) { return 0; }
+        if (load8(body + end) == 34) { go = 0; }
+        if (go == 1) { end = end + 1; }
+    }
+    var ul = end - start;
+    var out = alloc(ul + 1);
+    if (out == 0) { return 0; }
+    var i = 0;
+    while (i < ul) {
+        store8(out + i, load8(body + start + i));
+        i = i + 1;
+    }
+    store8(out + ul, 0);
+    return out;
+}
+
+# Find the first `"start":{"line":N` and return N (LSP
+# 0-indexed). Returns -1 if not found.
+
+fn _lsp_pos_extract_first_line(body, blen) {
+    var marker = "\"start\":{";
+    var sp = _lsp_diags_find(body, blen, 0, marker);
+    if (sp < 0) { return 0 - 1; }
+    var line_marker = "\"line\":";
+    var lp = _lsp_diags_find(body, blen, sp, line_marker);
+    if (lp < 0) { return 0 - 1; }
+    var np_slot[8];
+    store64(&np_slot, 0);
+    return _lsp_diag_parse_int(body, blen, lp + 7, &np_slot);
+}
+
+# Find the first `"start":{...,"character":N` and return N (LSP
+# 0-indexed). Returns -1 if not found.
+
+fn _lsp_pos_extract_first_character(body, blen) {
+    var marker = "\"start\":{";
+    var sp = _lsp_diags_find(body, blen, 0, marker);
+    if (sp < 0) { return 0 - 1; }
+    var char_marker = "\"character\":";
+    var cp = _lsp_diags_find(body, blen, sp, char_marker);
+    if (cp < 0) { return 0 - 1; }
+    var np_slot[8];
+    store64(&np_slot, 0);
+    return _lsp_diag_parse_int(body, blen, cp + 12, &np_slot);
+}

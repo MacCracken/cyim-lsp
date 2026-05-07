@@ -1,0 +1,15 @@
+# src/version_str.cyr — AUTO-GENERATED from `VERSION` by
+# `scripts/version-bump.sh`. Do NOT edit by hand; the next bump
+# will overwrite. To regenerate without bumping, run:
+#
+#   sh scripts/version-bump.sh "$(cat VERSION)"
+#
+# Mirrors cyim's pattern (cyim/src/version_str.cyr +
+# cyim/scripts/version-bump.sh). The standalone CLI banner in
+# src/main.cyr reads these vars instead of a hardcoded literal,
+# so the version string can never drift from VERSION.
+# cyrius.cyml's `version = "${file:VERSION}"` resolves
+# separately at build time.
+
+var _VERSION_STR_LSP = "cyim-lsp 1.0.0\n";
+var _VERSION_LEN_LSP = 15;

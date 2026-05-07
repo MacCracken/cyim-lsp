@@ -349,6 +349,174 @@ fn lsp_doc_did_change(s) {
     return _lsp_send_all(msg);
 }
 
+# === v0.6.0: navigation handlers ===
+#
+# Build the JSON params for textDocument/definition or references.
+# Both methods take the same params shape per LSP §3.10.7 / §3.10.8:
+#   {"textDocument":{"uri":"<uri>"},"position":{"line":L,"character":C}}
+# References has an extra `"context":{"includeDeclaration":true|false}`
+# but cyrius-lsp ignores it; v0.6.0 omits for brevity.
+
+fn _lsp_nav_build_params(uri, line, character) {
+    var ul = strlen(uri);
+    var line_str = _lsp_doc_itoa(line);
+    var char_str = _lsp_doc_itoa(character);
+    if (line_str == 0) { return 0; }
+    if (char_str == 0) { return 0; }
+    var ll = strlen(line_str);
+    var cl = strlen(char_str);
+    var cap = 80 + ul + ll + cl;
+    var out = alloc(cap);
+    if (out == 0) { return 0; }
+    var off = 0;
+    off = _lsp_append(out, off, "{\"textDocument\":{\"uri\":\"");
+    off = _lsp_append(out, off, uri);
+    off = _lsp_append(out, off, "\"},\"position\":{\"line\":");
+    off = _lsp_append(out, off, line_str);
+    off = _lsp_append(out, off, ",\"character\":");
+    off = _lsp_append(out, off, char_str);
+    off = _lsp_append(out, off, "}}");
+    store8(out + off, 0);
+    return out;
+}
+
+# Send a textDocument/<method> request (definition or references)
+# for the active buffer's cursor position. Returns the response
+# body cstring on success, 0 on failure (no server, not .cyr,
+# timeout, etc.). *body_len_out gets the body byte length.
+#
+# v0.6.0 max_iters = 5000 polling cycles. With ~1µs per non-
+# blocking sys_read on an empty pipe that's ~5ms wall-clock —
+# enough for cyrius-lsp to compile + respond on small files.
+# Larger files / slower servers may need a higher cap; v0.6.x
+# can tune.
+
+fn _lsp_nav_request(s, method, body_len_out) {
+    var path = editor_file_path(s);
+    if (path == 0) { return 0; }
+    if (_lsp_path_is_cyr(path) == 0) { return 0; }
+    if (_lsp_doc_lazy_start() != 0) { return 0; }
+    var b = editor_buf(s);
+    if (b == 0) { return 0; }
+    # Make sure the server has the latest buffer content. If we
+    # haven't sent didOpen / didChange yet for this buffer, the
+    # server doesn't know about it and definition/references will
+    # come up empty. lsp_doc_did_change (v0.4.0) handles the
+    # didOpen-on-first-touch case + didChange refresh.
+    lsp_doc_did_change(s);
+    var uri = _lsp_path_to_uri(path);
+    if (uri == 0) { return 0; }
+    var line_slot[8];
+    store64(&line_slot, 0);
+    var char_slot[8];
+    store64(&char_slot, 0);
+    _lsp_pos_offset_to_lc(b, editor_cursor(s), &line_slot, &char_slot);
+    var params = _lsp_nav_build_params(uri, load64(&line_slot), load64(&char_slot));
+    if (params == 0) { return 0; }
+    var id = jsonrpc_next_id();
+    var msg = jsonrpc_build_request(id, method, params);
+    if (msg == 0) { return 0; }
+    return _lsp_request_sync(msg, id, body_len_out, 5000);
+}
+
+# Public entry — :lsp-goto-def. Sends textDocument/definition,
+# parses the first Location result, jumps cursor if same-file.
+# Same-file jump only in v0.6.0; cross-file gets a status message.
+# Returns 0 on success, -1 on failure (cleanly degrades to "no
+# definition found" status for the user).
+
+fn lsp_nav_goto_def(s) {
+    var blen_slot[8];
+    store64(&blen_slot, 0);
+    var resp = _lsp_nav_request(s, "textDocument/definition", &blen_slot);
+    if (resp == 0) {
+        editor_set_status(s, "lsp: no response from server", 28);
+        return 0 - 1;
+    }
+    var blen = load64(&blen_slot);
+    var dest_uri = _lsp_pos_extract_uri(resp, blen);
+    if (dest_uri == 0) {
+        editor_set_status(s, "lsp: no definition found", 24);
+        return 0 - 1;
+    }
+    var dest_line = _lsp_pos_extract_first_line(resp, blen);
+    var dest_char = _lsp_pos_extract_first_character(resp, blen);
+    if (dest_line < 0) {
+        editor_set_status(s, "lsp: no position in response", 28);
+        return 0 - 1;
+    }
+    if (dest_char < 0) { dest_char = 0; }
+    # Same-file check — compare dest_uri to active buffer's URI.
+    var active_path = editor_file_path(s);
+    var active_uri = _lsp_path_to_uri(active_path);
+    if (_streq_dest(dest_uri, active_uri) == 1) {
+        var b = editor_buf(s);
+        var off = _lsp_pos_lc_to_offset(b, dest_line, dest_char);
+        editor_set_cursor(s, off);
+        return 0;
+    }
+    # Cross-file jump: print where the definition lives. v0.6.x
+    # adds buf_load_file integration once cyim's plugin ABI for
+    # opening files from a plugin context is settled.
+    var msg = "lsp: definition in another file (cross-file jump deferred)";
+    editor_set_status(s, msg, strlen(msg));
+    return 0;
+}
+
+# Helper: byte-equality of two NUL-term cstrings. Local to nav
+# code; mirrors helpers elsewhere in the codebase.
+fn _streq_dest(a, b) {
+    var i = 0;
+    while (1 == 1) {
+        var ca = load8(a + i);
+        var cb = load8(b + i);
+        if (ca != cb) { return 0; }
+        if (ca == 0) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Public entry — :lsp-find-refs. Sends textDocument/references,
+# counts results, prints summary in status. v0.6.x will populate
+# a quickfix list; v0.6.0 just shows "lsp: N references" so the
+# user knows the request worked.
+
+fn lsp_nav_find_refs(s) {
+    var blen_slot[8];
+    store64(&blen_slot, 0);
+    var resp = _lsp_nav_request(s, "textDocument/references", &blen_slot);
+    if (resp == 0) {
+        editor_set_status(s, "lsp: no response from server", 28);
+        return 0 - 1;
+    }
+    var blen = load64(&blen_slot);
+    # Count `"uri":` occurrences as a proxy for reference count.
+    var n = _lsp_diags_count_pattern(resp, blen, "\"uri\":");
+    var n_str = _lsp_doc_itoa(n);
+    if (n_str == 0) { return 0 - 1; }
+    var nl = strlen(n_str);
+    var prefix = "lsp: ";
+    var suffix = " references";
+    var pl = strlen(prefix);
+    var sl = strlen(suffix);
+    var msg = alloc(pl + nl + sl + 1);
+    if (msg == 0) { return 0 - 1; }
+    var off = 0;
+    var i = 0;
+    while (i < pl) { store8(msg + off + i, load8(prefix + i)); i = i + 1; }
+    off = off + pl;
+    i = 0;
+    while (i < nl) { store8(msg + off + i, load8(n_str + i)); i = i + 1; }
+    off = off + nl;
+    i = 0;
+    while (i < sl) { store8(msg + off + i, load8(suffix + i)); i = i + 1; }
+    off = off + sl;
+    store8(msg + off, 0);
+    editor_set_status(s, msg, off);
+    return 0;
+}
+
 # post_save hook handler — entry point from plugin_init.cyr's
 # `_cyim_lsp_post_save(s, path)`. Filters non-.cyr; sends
 # didOpen on first interaction (rare — usually a didChange

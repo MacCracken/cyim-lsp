@@ -1,0 +1,140 @@
+# tests/lsp_position.tcyr — position helpers + Location parser (v0.6.0)
+#
+# Tests:
+#   - _lsp_pos_offset_to_lc + _lsp_pos_lc_to_offset (round-trip)
+#   - _lsp_pos_extract_uri / _extract_first_line / _extract_first_character
+#
+# Position helpers reference cyim plugin ABI (`buf_get`, `buf_len`),
+# stubbed here with a static byte array so the helpers can run
+# standalone. The Location parsers are pure bytescan — no stubs
+# needed.
+
+include "src/jsonrpc.cyr"
+include "src/subprocess.cyr"
+include "src/lsp_diags.cyr"
+include "src/lsp_client.cyr"
+include "src/lsp_state.cyr"
+
+# Stub cyim plugin ABI — backed by a static byte array.
+var _stub_buf_data = 0;
+var _stub_buf_len  = 0;
+
+fn buf_len(b)        { return _stub_buf_len; }
+fn buf_get(b, i)     { return load8(_stub_buf_data + i); }
+fn editor_buf(s)     { return 0; }
+fn editor_file_path(s) { return 0; }
+fn editor_cursor(s)  { return 0; }
+fn editor_set_cursor(s, off) { return 0; }
+fn editor_set_status(s, m, l) { return 0; }
+
+include "src/lsp_position.cyr"
+
+fn _streq(a, b) {
+    var i = 0;
+    while (1 == 1) {
+        var ca = load8(a + i);
+        var cb = load8(b + i);
+        if (ca != cb) { return 0; }
+        if (ca == 0) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Set up the stub buffer with `text` (NUL-term cstring).
+fn _stub_load(text) {
+    _stub_buf_data = text;
+    _stub_buf_len = strlen(text);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("offset_to_lc: empty buffer");
+    _stub_load("");
+    var lo[8]; store64(&lo, 99);
+    var co[8]; store64(&co, 99);
+    _lsp_pos_offset_to_lc(1, 0, &lo, &co);
+    assert_eq(load64(&lo), 0, "line 0");
+    assert_eq(load64(&co), 0, "char 0");
+
+    test_group("offset_to_lc: single line");
+    _stub_load("hello");
+    _lsp_pos_offset_to_lc(1, 0, &lo, &co);
+    assert_eq(load64(&lo), 0, "start: line 0");
+    assert_eq(load64(&co), 0, "start: char 0");
+    _lsp_pos_offset_to_lc(1, 5, &lo, &co);
+    assert_eq(load64(&lo), 0, "end of single line: line still 0");
+    assert_eq(load64(&co), 5, "end: char 5");
+
+    test_group("offset_to_lc: multi-line");
+    _stub_load("ab\ncd\nef");
+    _lsp_pos_offset_to_lc(1, 0, &lo, &co);
+    assert_eq(load64(&lo), 0, "off 0 -> line 0 char 0");
+    assert_eq(load64(&co), 0, "");
+    _lsp_pos_offset_to_lc(1, 2, &lo, &co);
+    assert_eq(load64(&lo), 0, "off 2 -> line 0 char 2 (before \\n)");
+    assert_eq(load64(&co), 2, "");
+    _lsp_pos_offset_to_lc(1, 3, &lo, &co);
+    assert_eq(load64(&lo), 1, "off 3 -> line 1 char 0 (just past \\n)");
+    assert_eq(load64(&co), 0, "");
+    _lsp_pos_offset_to_lc(1, 4, &lo, &co);
+    assert_eq(load64(&lo), 1, "off 4 -> line 1 char 1");
+    assert_eq(load64(&co), 1, "");
+    _lsp_pos_offset_to_lc(1, 7, &lo, &co);
+    assert_eq(load64(&lo), 2, "off 7 -> line 2 char 1");
+    assert_eq(load64(&co), 1, "");
+
+    test_group("lc_to_offset: round-trips");
+    _stub_load("ab\ncd\nef");
+    assert_eq(_lsp_pos_lc_to_offset(1, 0, 0), 0, "line 0 char 0 -> off 0");
+    assert_eq(_lsp_pos_lc_to_offset(1, 0, 2), 2, "line 0 char 2 -> off 2");
+    assert_eq(_lsp_pos_lc_to_offset(1, 1, 0), 3, "line 1 char 0 -> off 3");
+    assert_eq(_lsp_pos_lc_to_offset(1, 2, 1), 7, "line 2 char 1 -> off 7");
+
+    test_group("lc_to_offset: clamps to buffer end");
+    var n = _lsp_pos_lc_to_offset(1, 99, 99);
+    assert_eq(n, 8, "way past end -> buf_len");
+
+    test_group("offset/lc round-trip: every offset 0..N maps back");
+    _stub_load("ab\ncd\nef");
+    var i = 0;
+    while (i <= 8) {
+        _lsp_pos_offset_to_lc(1, i, &lo, &co);
+        var rt = _lsp_pos_lc_to_offset(1, load64(&lo), load64(&co));
+        assert_eq(rt, i, "round-trip");
+        i = i + 1;
+    }
+
+    test_group("extract_uri: pulls URI from Location response");
+    var resp_def = "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"uri\":\"file:///dst.cyr\",\"range\":{\"start\":{\"line\":7,\"character\":2},\"end\":{\"line\":7,\"character\":12}}}}";
+    var u = _lsp_pos_extract_uri(resp_def, strlen(resp_def));
+    assert_neq(u, 0, "URI extracted");
+    assert_eq(_streq(u, "file:///dst.cyr"), 1, "URI matches");
+
+    test_group("extract_first_line / character");
+    var ln = _lsp_pos_extract_first_line(resp_def, strlen(resp_def));
+    var ch = _lsp_pos_extract_first_character(resp_def, strlen(resp_def));
+    assert_eq(ln, 7, "line 7");
+    assert_eq(ch, 2, "character 2");
+
+    test_group("extract from Location[] (array form): peeks first");
+    var resp_arr = "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":[{\"uri\":\"file:///a.cyr\",\"range\":{\"start\":{\"line\":1,\"character\":3},\"end\":{\"line\":1,\"character\":7}}},{\"uri\":\"file:///b.cyr\",\"range\":{\"start\":{\"line\":99,\"character\":99},\"end\":{}}}]}";
+    var u2 = _lsp_pos_extract_uri(resp_arr, strlen(resp_arr));
+    assert_eq(_streq(u2, "file:///a.cyr"), 1, "first URI");
+    var ln2 = _lsp_pos_extract_first_line(resp_arr, strlen(resp_arr));
+    assert_eq(ln2, 1, "first line");
+
+    test_group("extract from empty result");
+    var resp_empty = "{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":null}";
+    var u3 = _lsp_pos_extract_uri(resp_empty, strlen(resp_empty));
+    assert_eq(u3, 0, "no URI in null result");
+    var ln3 = _lsp_pos_extract_first_line(resp_empty, strlen(resp_empty));
+    assert_eq(ln3, 0 - 1, "no line -> -1");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

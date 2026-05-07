@@ -9,8 +9,10 @@
 #
 # Stdlib auto-included via cyrius.cyml.
 
+include "src/version_str.cyr"
 include "src/jsonrpc.cyr"
 include "src/subprocess.cyr"
+include "src/lsp_diags.cyr"
 include "src/lsp_client.cyr"
 
 # Print a NUL-term cstring + newline. Avoids hand-counting byte
@@ -23,7 +25,10 @@ fn _emit(s) {
 
 fn main() {
     alloc_init();
-    _emit("cyim-lsp 0.5.1 (inline diag highlighting)");
+    # Banner reads from src/version_str.cyr (auto-generated from
+    # VERSION by scripts/version-bump.sh). Single source of truth;
+    # no hardcoded version literal in source.
+    syscall(1, 1, _VERSION_STR_LSP, _VERSION_LEN_LSP);
     var v = jsonrpc_version();
     syscall(1, 1, "JSON-RPC version: ", 18);
     _emit(v);

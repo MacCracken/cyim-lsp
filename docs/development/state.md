@@ -5,6 +5,18 @@
 
 ## Version
 
+**1.0.0** — Public API freeze shipped 2026-05-06. ADR 0001
+formalises the surface (entry point, hooks, ex-commands,
+struct layouts). cyim 1.4.0 picks up this contract.
+
+**0.7.0** — M7 (closeout audit). 30-function dead-code floor
+recorded; security re-scan clean.
+
+**0.6.0** — M6 (navigation) shipped 2026-05-06. Ex-commands
+`:lsp-goto-def` and `:lsp-find-refs`. Synchronous request/
+response helper. Position conversions. v0.7.0 (closeout) +
+v1.0.0 (API freeze) next.
+
 **0.5.1** — M5 (inline diag highlighting) shipped 2026-05-06.
 Per-diag tuples extracted via brace-depth + string-aware walker
 over the publishDiagnostics body; `diagnostic_provider` hook

@@ -47,9 +47,10 @@ stdlib = [
 modules = [
     "src/jsonrpc.cyr",
     "src/subprocess.cyr",
+    "src/lsp_diags.cyr",
     "src/lsp_client.cyr",
     "src/lsp_state.cyr",
+    "src/lsp_position.cyr",
     "src/lsp_documents.cyr",
-    "src/lsp_diags.cyr",
     "src/plugin_init.cyr",
 ]

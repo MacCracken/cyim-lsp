@@ -186,18 +186,36 @@ diagnostic_provider hook).
   publishDiagnostics in a way that breaks bytescan, refactor
   to use cyrius's `json_parse`.
 
-### M5 — Navigation (v0.6.0)
+### M5 (renumbered → M5b) — Inline diag highlighting (v0.5.1) — ✅ shipped 2026-05-06
 
-**Acceptance:** `gd` jumps to definition, `gr` populates a
-references list.
+(Renumbered: original M5 was navigation; v0.5.1 inserted "inline
+diag highlighting" between v0.5.0 and v0.6.0 as a tighter
+follow-up. The original M5 navigation lands at v0.6.0 below.)
 
-- `textDocument/definition` request + response handler
-- `textDocument/references` request + response handler
-- normal_key registration for `g d` / `g r` (requires cyim's
-  plugin-prefix-keymap ABI — coordinate with cyim if needed; an
-  earlier milestone may add the prefix support to cyim)
-- Cursor jump for definition (single result); quickfix-style
-  list for references
+### M6 (renumbered → M6) — Navigation (v0.6.0) — ✅ shipped 2026-05-06
+
+- `_lsp_request_sync` in lsp_client.cyr — synchronous request/
+  response with id-correlation; polls drain loop while keeping
+  publishDiagnostics handlers wired during the wait.
+- `lsp_nav_goto_def(s)` — sends textDocument/definition; jumps
+  cursor for same-file results; prints status for cross-file.
+- `lsp_nav_find_refs(s)` — sends textDocument/references; prints
+  "lsp: N references" count in status.
+- `src/lsp_position.cyr` — offset↔line/character conversions
+  + Location response parser (bytescan).
+- Wired ex-commands: `:lsp-goto-def`, `:lsp-find-refs`. Also
+  real `:lsp-restart` (kill+respawn+initialize) and
+  `:lsp-status` (pid + describe).
+- 38 new test assertions in tests/lsp_position.tcyr.
+
+**Deviations from original M5 plan**:
+- **Ex-commands instead of `gd` / `gr`**. cyim's plugin-prefix-
+  keymap ABI isn't wired; cyim 1.4.x adds it, then cyim-lsp
+  v0.6.x can register the keymaps in addition to ex-commands.
+- **Cross-file jumps deferred**. Same-file only at v0.6.0; needs
+  cyim's `buf_load_file`-from-plugin-context ABI.
+- **References as count, not list**. Quickfix list deferred to
+  v0.6.x once cyim has list-display ABI.
 
 ### M6 — Closeout (v0.7.0)
 
@@ -215,12 +233,36 @@ references list.
 - Documentation: full guide pass; architecture docs for any
   non-obvious invariants surfaced during M1–M5
 
-### v1.0.0 — Public API freeze
+### M7 — Closeout (v0.7.0) — ✅ shipped 2026-05-06
 
-- Tag v1.0.0 once all M6 closeout items pass
-- Folding into cyrius stdlib (sandhi-pattern fold) deferred
-  until a second long-horizon consumer materializes per
-  niyama's ADR 0011 fold-trigger precedent
+- Full clean test+fuzz from `rm -rf build`; all 164 assertions
+  PASS, fuzz PASS, lint clean.
+- Dead-code floor recorded (30 source-side functions, all
+  intentional public ABI for cyim-side fold-in).
+- Security re-scan: no `sys_system` / `popen` / `setuid`;
+  `_lsp_proc_exec` is our own subprocess helper (expected);
+  unchecked syscalls return values to caller (correct pattern).
+- Refactor pass: nothing warranted consolidation.
+- Doc sync confirmed.
+
+### v1.0.0 — Public API freeze — ✅ shipped 2026-05-06
+
+- ADR 0001 formalises the surface: entry point, hook callbacks,
+  ex-commands (`:lsp-restart`, `:lsp-status`, `:lsp-goto-def`,
+  `:lsp-find-refs`), client API (`lsp_client_*`), framing
+  (`jsonrpc_*`), subprocess (`lsp_proc_*`), diag state
+  (`lsp_diags_*`), document state (`lsp_state_*`), document
+  handlers (`lsp_doc_*`, `lsp_nav_*`), position helpers
+  (`_lsp_pos_*`).
+- Compatibility envelope: stable across 1.x, additions
+  allowed, breaking changes need 2.x.
+- cyim 1.4.0 ready: 3-line cyim-side change picks up the
+  frozen contract via `[plugins.cyim-lsp]` git tag `1.0.0`.
+
+**Folding into cyrius stdlib** (sandhi-pattern fold) deferred
+until a second long-horizon consumer materializes per niyama's
+ADR 0011 fold-trigger precedent. cyim-lsp 1.x patches still
+land here; post-fold extensions land in the vendored copy.
 
 ## Out of scope (for v1.0)
 
@@ -250,9 +292,8 @@ references list.
 
 ## Last updated
 
-2026-05-06 — v0.5.1 shipped (M5, inline diag highlighting).
-publishDiagnostics-to-render round-trip complete: server →
-drain → walker → tuples → diagnostic_provider → cyim's
-diag_new → render-side inline paint. cyim 1.4.x recommended
-pickup. v0.6.0 (`gd` / `gr` definition / references) is the
-next chunk.
+2026-05-06 — **v1.0.0 shipped**. Public API frozen per ADR 0001;
+cyim 1.4.0 ready to pick up the frozen contract. cyim-lsp 1.x
+patches accrete forward (cross-file jumps, gd/gr keymaps,
+reference quickfix) without breaking the freeze. v2.0 reserved
+for any breaking changes.

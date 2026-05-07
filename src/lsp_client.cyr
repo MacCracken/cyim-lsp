@@ -279,6 +279,120 @@ fn _lsp_drain_frames(handler_fp) {
     return dispatched;
 }
 
+# === v0.6.0: synchronous request/response helper ===
+#
+# `_lsp_request_sync` sends a JSON-RPC request and polls the drain
+# until a response arrives with the matching id, or until
+# `max_iters` polling cycles elapse (rough timeout — each cycle
+# does one non-blocking read attempt + tight loop).
+#
+# Used by navigation (textDocument/definition, references) where
+# the user presses a key / runs an ex-command and expects a
+# result without returning to the editor's render loop. LSP
+# responses to definition queries from cyrius-lsp typically
+# arrive within a few ms; max_iters of 1000 (with a tight inner
+# loop) gives ample headroom without freezing cyim if the server
+# is slow / dead.
+#
+# Notification handlers (publishDiagnostics) registered with
+# `_lsp_drain_frames` still fire during the wait — non-response
+# frames just go through the normal handler chain.
+#
+# Returns the body buffer + sets *body_off_out / *body_len_out
+# on success. 0 on timeout / error.
+
+# State for matching incoming responses to the in-flight request.
+var _lsp_pending_id     = 0;
+var _lsp_pending_body   = 0;
+var _lsp_pending_off    = 0;
+var _lsp_pending_len    = 0;
+
+# Frame handler invoked by drain when waiting for a response. If
+# the frame's `"id":N` matches the pending request id, capture
+# the body for the caller and clear the pending slot. Other
+# frames (notifications) get dispatched to lsp_diags_handle_frame
+# so publishDiagnostics still updates state during sync waits.
+fn _lsp_response_handler(body, body_len) {
+    if (_lsp_pending_id == 0) {
+        # Not currently waiting — let other handlers (diags) see it.
+        lsp_diags_handle_frame(body, body_len);
+        return 0;
+    }
+    # Look for `"id":<n>` (response). Bytescan because we don't
+    # have the json stdlib parser in this hot path.
+    var id_marker = "\"id\":";
+    var ip = _lsp_diags_find(body, body_len, 0, id_marker);
+    if (ip < 0) {
+        # No id field → notification (publishDiagnostics, etc).
+        lsp_diags_handle_frame(body, body_len);
+        return 0;
+    }
+    var np_slot[8];
+    store64(&np_slot, 0);
+    var fid = _lsp_diag_parse_int(body, body_len, ip + 5, &np_slot);
+    if (fid != _lsp_pending_id) {
+        # Response to some other request, or the id is wrong.
+        lsp_diags_handle_frame(body, body_len);
+        return 0;
+    }
+    # Match: capture body for the caller. Allocate copy so the
+    # frame buffer (drain's scratch) can be reused.
+    var copy = alloc(body_len + 1);
+    if (copy == 0) { return 0; }
+    var i = 0;
+    while (i < body_len) {
+        store8(copy + i, load8(body + i));
+        i = i + 1;
+    }
+    store8(copy + body_len, 0);
+    _lsp_pending_body = copy;
+    _lsp_pending_off  = 0;
+    _lsp_pending_len  = body_len;
+    _lsp_pending_id   = 0;   # clear pending — caller picks up
+    return 0;
+}
+
+# Send `request_msg` (a framed JSON-RPC cstring built by
+# jsonrpc_build_request) and poll until the response with
+# `expected_id` arrives or `max_iters` polling cycles elapse.
+# Returns response body cstring (heap-owned, length in *len_out)
+# or 0 on timeout / error.
+fn _lsp_request_sync(request_msg, expected_id, body_len_out, max_iters) {
+    if (_lsp_proc == 0) { return 0; }
+    if (_lsp_pending_id != 0) {
+        # Already waiting on a different request — concurrent
+        # sync requests not supported in v0.6.0.
+        return 0;
+    }
+    _lsp_pending_id   = expected_id;
+    _lsp_pending_body = 0;
+    _lsp_pending_len  = 0;
+    if (_lsp_send_all(request_msg) != 0) {
+        _lsp_pending_id = 0;
+        return 0;
+    }
+    var iter = 0;
+    var go = 1;
+    while (go == 1) {
+        if (iter >= max_iters) { go = 0; }
+        if (go == 1) {
+            _lsp_drain_frames(&_lsp_response_handler);
+            if (_lsp_pending_body != 0) {
+                # Response arrived (handler captured it).
+                store64(body_len_out, _lsp_pending_len);
+                var b = _lsp_pending_body;
+                _lsp_pending_body = 0;
+                _lsp_pending_len  = 0;
+                return b;
+            }
+            iter = iter + 1;
+        }
+    }
+    # Timeout: clear pending so future calls can retry.
+    _lsp_pending_id = 0;
+    return 0;
+}
+
 # Send `shutdown` request, await response, then send `exit`
 # notification. After this the server should exit on its own;
 # lsp_proc_close still calls sys_waitpid to reap.
