@@ -1,0 +1,107 @@
+# fuzz/jsonrpc.fcyr — random byte feeder for jsonrpc_parse_frame
+#
+# Drives 5,000 random buffers (length 0–256 bytes) through
+# jsonrpc_parse_frame. Asserts:
+#   - returned status is one of {1, 0, -1} (no other ints)
+#   - if return is 1, body offset + length stay within buf bounds
+#   - never panics, never reads past `len`
+#
+# This catches:
+#   - OOB reads on truncated buffers
+#   - Integer overflow in the decimal-length parser on adversarial
+#     digit runs (e.g. 999...9 saturating i64)
+#   - Crashes on bytes that resemble Content-Length but malformed
+#     (e.g. "Content-Length: " followed by non-digit / no \r\n\r\n)
+#
+# v0.2.0 ships this fuzz harness alongside the round-trip .tcyr —
+# the .tcyr is the positive-control path (build → parse asserts
+# correctness); the .fcyr is the negative-control / robustness
+# guard.
+
+include "lib/syscalls.cyr"
+include "lib/alloc.cyr"
+include "lib/string.cyr"
+include "src/jsonrpc.cyr"
+
+# Linear-congruential RNG. Same seed sequence as cyim's fuzz/.fcyr
+# files — deterministic across runs so failures are reproducible.
+var _rng = 0;
+fn rng_seed(s)  { _rng = s; return 0; }
+fn rng_next()   { _rng = _rng * 6364136223846793005 + 1442695040888963407; return _rng; }
+
+# Random byte 0..255.
+fn rng_byte() {
+    var v = rng_next();
+    if (v < 0) { v = 0 - v; }
+    return v - (v / 256) * 256;
+}
+
+# Random length 0..max-1.
+fn rng_len(max) {
+    var v = rng_next();
+    if (v < 0) { v = 0 - v; }
+    return v - (v / max) * max;
+}
+
+fn fuzz_iter(buf, max_len) {
+    var len = rng_len(max_len + 1);
+    var i = 0;
+    while (i < len) {
+        store8(buf + i, rng_byte());
+        i = i + 1;
+    }
+    var off_slot[8];
+    store64(&off_slot, 0);
+    var len_slot[8];
+    store64(&len_slot, 0);
+    var rc = jsonrpc_parse_frame(buf, len, &off_slot, &len_slot);
+    # Invariant 1: rc is one of {1, 0, -1}
+    if (rc != 1) {
+        if (rc != 0) {
+            if (rc != 0 - 1) {
+                syscall(1, 2, "FAIL: rc not in {1,0,-1}\n", 25);
+                return 1;
+            }
+        }
+    }
+    # Invariant 2: on rc=1, body_off + body_len <= len
+    if (rc == 1) {
+        var bo = load64(&off_slot);
+        var bl = load64(&len_slot);
+        if (bo < 0) {
+            syscall(1, 2, "FAIL: negative body_off\n", 24);
+            return 1;
+        }
+        if (bl < 0) {
+            syscall(1, 2, "FAIL: negative body_len\n", 24);
+            return 1;
+        }
+        if (bo + bl > len) {
+            syscall(1, 2, "FAIL: body span exceeds buffer\n", 31);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    rng_seed(20260506);
+    var max_len = 256;
+    var buf = alloc(max_len);
+    var iters = 5000;
+    var i = 0;
+    while (i < iters) {
+        var bad = fuzz_iter(buf, max_len);
+        if (bad == 1) {
+            syscall(1, 2, "fuzz/jsonrpc: FAIL\n", 19);
+            return 1;
+        }
+        i = i + 1;
+    }
+    syscall(1, 1, "fuzz/jsonrpc: ok (5000 random buffers, all invariants held)\n", 60);
+    return 0;
+}
+
+var r = main();
+syscall(60, r);

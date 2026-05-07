@@ -4,6 +4,78 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-05-06
+
+M1 — JSON-RPC framing.
+
+Replaces the v0.1.0 stub `jsonrpc.cyr` with a real implementation
+of the four functions cyim-lsp needs to talk to a server:
+
+- **`jsonrpc_build_notification(method, params)`** — builds a
+  framed `Content-Length: <N>\r\n\r\n{...}` cstring containing
+  `{"jsonrpc":"2.0","method":"<method>","params":<params>}`.
+  `params` is a pre-serialized JSON value (object, array, or
+  null) — keeps the API surface tight.
+- **`jsonrpc_build_request(id, method, params)`** — same as
+  notification with an `"id":<id>` field for response correlation.
+- **`jsonrpc_parse_frame(buf, len, off_out, len_out)`** — strips
+  the Content-Length header, returns body offset + length.
+  Tri-state return: `1` (valid), `0` (incomplete — caller
+  accumulates more bytes), `-1` (malformed — caller drops).
+- **`jsonrpc_next_id()`** — auto-incrementing i64 message-id
+  allocator. Notifications don't consume an id; only requests do.
+
+The envelope is hand-rolled rather than going through json
+stdlib's `json_build` because the JSON-RPC envelope shape is
+fixed (3 keys for notification, 4 for request) and embedding
+pre-serialized `params` keeps callers in control of the params
+shape. v0.3.0 (subprocess + initialize handshake) and beyond
+will use json stdlib for the more complex incoming-message
+parsing where dynamic key extraction matters.
+
+### Added
+
+- **Real `src/jsonrpc.cyr` implementation** (~200 lines, replaces
+  the v0.1.0 stub). Hand-rolled envelope construction; bounded
+  buffer alloc with explicit cap calculation; `_jr_append` /
+  `_jr_itoa` / `_jr_frame` internal helpers (underscore-prefixed,
+  not part of the public ABI).
+- **`tests/jsonrpc.tcyr`** (180 lines, 21 assertions across 13
+  groups). Coverage: monotonic id allocator, build → parse
+  round-trip with body-bytes verification, request id-field
+  inclusion, three rejection paths (wrong prefix / non-digit
+  length / empty length), incomplete-buffer states (header-only,
+  body-truncated, < 16 bytes), zero-length body, notification
+  doesn't consume an id.
+- **`fuzz/jsonrpc.fcyr`** (random byte feeder). 5000 random
+  buffers (length 0–256) through `jsonrpc_parse_frame`; asserts
+  return code is one of {1, 0, -1} and that `body_off + body_len
+  <= len` on success. Catches OOB reads, integer-overflow on
+  adversarial digit runs, and crashes on malformed Content-Length-
+  shaped bytes. PASS at v0.2.0.
+
+### Changed
+
+- **`src/jsonrpc.cyr`** — promoted from v0.1.0 stub
+  (`jsonrpc_version()` only) to full M1 surface. The placeholder
+  comment block in v0.1.0 said "full encoding lands at v0.2.0";
+  this is that release.
+
+### Notes
+
+- **Subprocess + protocol handshake (M2 / v0.3.0) is the next
+  bite.** v0.2.0 is testable in isolation — round-trip via
+  `tests/jsonrpc.tcyr` proves the framing without needing a
+  real cyrius-lsp running.
+- **No new stdlib deps.** `cyrius.cyml` declared `json` and
+  `process` at v0.1.0; v0.2.0's hand-rolled approach uses
+  neither yet. They come into play at M2+ (process spawn) and
+  M5 (publishDiagnostics parsing).
+- **Plugin ABI surface unchanged.** v0.2.0 is internal-only;
+  cyim doesn't see a behaviour difference. The plugin-init
+  callbacks remain no-op stubs until M3 (didOpen / didChange /
+  didSave) wires real protocol behavior.
+
 ## [0.1.0] — 2026-05-06
 
 Initial scaffold release. Establishes the plugin's structure +

@@ -1,0 +1,172 @@
+# tests/jsonrpc.tcyr — JSON-RPC framing round-trip + edge cases (v0.2.0)
+#
+# Exercises the four public functions in src/jsonrpc.cyr:
+#   - jsonrpc_version         (string literal)
+#   - jsonrpc_next_id          (monotonic counter)
+#   - jsonrpc_build_notification (Content-Length-framed cstring)
+#   - jsonrpc_build_request     (same with id field)
+#   - jsonrpc_parse_frame       (1=valid / 0=incomplete / -1=malformed)
+#
+# Round-trip = build a message, parse it back, verify body bytes
+# match what we built. This proves the framing is symmetric and
+# that the Content-Length count we wrote matches what the parser
+# sees.
+
+include "src/jsonrpc.cyr"
+
+# Compare byte ranges. Returns 1 on match, 0 on mismatch.
+fn _bytes_eq(buf, off, expected) {
+    var el = strlen(expected);
+    var i = 0;
+    while (i < el) {
+        if (load8(buf + off + i) != load8(expected + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Compare two NUL-term cstrings.
+fn _streq(a, b) {
+    var i = 0;
+    while (1 == 1) {
+        var ca = load8(a + i);
+        var cb = load8(b + i);
+        if (ca != cb) { return 0; }
+        if (ca == 0) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("jsonrpc_version returns the LSP-required '2.0' string");
+    var v = jsonrpc_version();
+    assert_eq(_streq(v, "2.0"), 1, "version literal");
+
+    test_group("jsonrpc_next_id is monotonic starting at 1");
+    var id1 = jsonrpc_next_id();
+    var id2 = jsonrpc_next_id();
+    var id3 = jsonrpc_next_id();
+    assert_eq(id1, 1, "first id is 1");
+    assert_eq(id2, 2, "second id is 2");
+    assert_eq(id3, 3, "third id is 3");
+
+    test_group("notification builds with proper Content-Length header");
+    var n = jsonrpc_build_notification("textDocument/didSave",
+                                       "{\"textDocument\":{\"uri\":\"file:///foo\"}}");
+    assert_neq(n, 0, "notification non-null");
+    # Frame should start with "Content-Length: "
+    assert_eq(_bytes_eq(n, 0, "Content-Length: "), 1, "frame starts with Content-Length");
+
+    test_group("notification round-trips through parse_frame");
+    var off_slot[8];
+    store64(&off_slot, 0);
+    var len_slot[8];
+    store64(&len_slot, 0);
+    var rc = jsonrpc_parse_frame(n, strlen(n), &off_slot, &len_slot);
+    assert_eq(rc, 1, "parse returns 1 (valid)");
+    var body_off = load64(&off_slot);
+    var body_len = load64(&len_slot);
+    # Body should start with `{"jsonrpc":"2.0","method":"`
+    assert_eq(_bytes_eq(n, body_off,
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didSave\""), 1,
+        "body has the expected prefix");
+    # Body length should match what we computed
+    var body_str = "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didSave\",\"params\":{\"textDocument\":{\"uri\":\"file:///foo\"}}}";
+    assert_eq(body_len, strlen(body_str), "body_len matches built body");
+
+    test_group("request includes the id field");
+    var r = jsonrpc_build_request(42, "textDocument/definition",
+                                  "{\"line\":10}");
+    assert_neq(r, 0, "request non-null");
+    var off_slot2[8];
+    store64(&off_slot2, 0);
+    var len_slot2[8];
+    store64(&len_slot2, 0);
+    var rc2 = jsonrpc_parse_frame(r, strlen(r), &off_slot2, &len_slot2);
+    assert_eq(rc2, 1, "request frame parses");
+    var body_off2 = load64(&off_slot2);
+    assert_eq(_bytes_eq(r, body_off2,
+        "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\""), 1,
+        "request body starts with id field");
+
+    test_group("parse_frame returns 0 on incomplete buffer (header only)");
+    var partial = "Content-Length: 5\r\n";   # body missing
+    var off_slot3[8];
+    store64(&off_slot3, 0);
+    var len_slot3[8];
+    store64(&len_slot3, 0);
+    var rc3 = jsonrpc_parse_frame(partial, strlen(partial), &off_slot3, &len_slot3);
+    assert_eq(rc3, 0, "incomplete -> 0");
+
+    test_group("parse_frame returns 0 on incomplete body");
+    var partial2 = "Content-Length: 100\r\n\r\n{\"jsonrpc\":\"2.0\"}";
+    # Header says body is 100 bytes; we only have 17. Parser
+    # should ask for more.
+    var off_slot4[8];
+    store64(&off_slot4, 0);
+    var len_slot4[8];
+    store64(&len_slot4, 0);
+    var rc4 = jsonrpc_parse_frame(partial2, strlen(partial2), &off_slot4, &len_slot4);
+    assert_eq(rc4, 0, "incomplete body -> 0");
+
+    test_group("parse_frame rejects malformed prefix");
+    var bad1 = "Bogus-Header: 5\r\n\r\nhello";
+    var s5[8];
+    store64(&s5, 0);
+    var s6[8];
+    store64(&s6, 0);
+    var rc5 = jsonrpc_parse_frame(bad1, strlen(bad1), &s5, &s6);
+    assert_eq(rc5, 0 - 1, "wrong prefix -> -1");
+
+    test_group("parse_frame rejects non-digit in length field");
+    var bad2 = "Content-Length: abc\r\n\r\nhello";
+    var s7[8];
+    store64(&s7, 0);
+    var s8[8];
+    store64(&s8, 0);
+    var rc6 = jsonrpc_parse_frame(bad2, strlen(bad2), &s7, &s8);
+    assert_eq(rc6, 0 - 1, "non-digit length -> -1");
+
+    test_group("parse_frame rejects empty length field");
+    var bad3 = "Content-Length: \r\n\r\nhello";
+    var s9[8];
+    store64(&s9, 0);
+    var s10[8];
+    store64(&s10, 0);
+    var rc7 = jsonrpc_parse_frame(bad3, strlen(bad3), &s9, &s10);
+    assert_eq(rc7, 0 - 1, "empty length -> -1");
+
+    test_group("parse_frame handles zero-length body");
+    var empty = "Content-Length: 0\r\n\r\n";
+    var s11[8];
+    store64(&s11, 0);
+    var s12[8];
+    store64(&s12, 0);
+    var rc8 = jsonrpc_parse_frame(empty, strlen(empty), &s11, &s12);
+    assert_eq(rc8, 1, "zero-length body parses");
+    assert_eq(load64(&s12), 0, "body_len = 0");
+
+    test_group("parse_frame handles short buffer (< 16 bytes)");
+    var tiny = "Content";
+    var s13[8];
+    store64(&s13, 0);
+    var s14[8];
+    store64(&s14, 0);
+    var rc9 = jsonrpc_parse_frame(tiny, strlen(tiny), &s13, &s14);
+    assert_eq(rc9, 0, "< 16 bytes -> incomplete");
+
+    test_group("notification + request use independent id space");
+    var pre = jsonrpc_next_id();
+    var notif = jsonrpc_build_notification("foo", "null");
+    var post = jsonrpc_next_id();
+    # Notifications don't consume an id
+    assert_eq(post - pre, 1, "notification did not advance id counter");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

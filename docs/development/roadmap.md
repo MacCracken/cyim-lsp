@@ -52,20 +52,24 @@ diagnostic_provider hook).
   `dist/cyim-lsp.cyr` ready for fold-in
 - Pinned against cyim ADR 0004's frozen plugin ABI
 
-### M1 — JSON-RPC framing (v0.2.0)
+### M1 — JSON-RPC framing (v0.2.0) — ✅ shipped 2026-05-06
 
-**Acceptance:** round-trip an LSP message in unit tests without a
-real subprocess.
-
-- `jsonrpc_build(method, params)` — Content-Length-framed
-  request/notification cstring
-- `jsonrpc_parse_frame(buf, len)` — strip Content-Length header,
-  return body offset + length
-- Message-id correlation: request → expected response id
-- Tests: round-trip notifications + requests + responses;
-  malformed-header rejection; partial-frame buffering
-- Fuzz harness: random byte sequences fed to
-  `jsonrpc_parse_frame`; invariants — no panics, no OOB reads
+- `jsonrpc_build_notification(method, params)` — Content-Length-
+  framed cstring; `params` is pre-serialized JSON
+- `jsonrpc_build_request(id, method, params)` — same plus `id`
+  field for response correlation
+- `jsonrpc_parse_frame(buf, len, off_out, len_out)` — tri-state
+  return: 1 valid / 0 incomplete / -1 malformed
+- `jsonrpc_next_id()` — monotonic id allocator (notifications
+  don't consume ids)
+- Tests: 21 assertions across 13 groups in
+  `tests/jsonrpc.tcyr`; round-trip + 3 rejection paths +
+  incomplete-buffer states + zero-length body + notification id
+  invariant
+- Fuzz: `fuzz/jsonrpc.fcyr` runs 5000 random buffers through
+  `jsonrpc_parse_frame`; invariants {return ∈ {1,0,-1};
+  body_off + body_len ≤ buf_len on success} hold across all
+  iterations
 
 ### M2 — Subprocess lifecycle (v0.3.0)
 
@@ -178,5 +182,5 @@ references list.
 
 ## Last updated
 
-2026-05-06 — v0.1.0 scaffold shipped. M1 (JSON-RPC framing) is
-the next session-scoped chunk.
+2026-05-06 — v0.2.0 shipped (M1, JSON-RPC framing). M2
+(subprocess lifecycle, v0.3.0) is the next session-scoped chunk.
