@@ -4,6 +4,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.1] — TBD
+
+Audit-finding repairs from the v1.0.0 pre-freeze security pass
+([`docs/audit/2026-05-06-audit.md`](docs/audit/2026-05-06-audit.md)).
+All three findings are LOW / defense-in-depth — not exploitable
+under the v1.0.0 consumer set, but contract-tightening landings
+worth shipping promptly so any future consumer can rely on the
+parser invariants.
+
+### Security
+
+- **F-1 — Content-Length integer overflow.** `jsonrpc_parse_frame`
+  in `src/jsonrpc.cyr` now caps the parsed Content-Length at
+  16 MB (matching `_lsp_recv_frame`'s buffer cap) and returns
+  `-1` (malformed) if a server's header digits would exceed
+  it. Closes the contract gap where a malicious server could
+  send `Content-Length: 99999999999999999999\r\n\r\n…` and
+  overflow `n` to a negative value.
+- **F-2 — Diagnostic integer overflow.** `_lsp_diag_parse_int`
+  in `src/lsp_diags.cyr` caps line / severity values at 100M
+  (LSP coords are non-negative; 100M dwarfs any real file).
+  Same overflow shape as F-1.
+- **F-3 — String parser second-pass bound.** Mirror first
+  pass's `if (rp >= blen) { return 0; }` guard at the top of
+  `_lsp_diag_parse_string`'s second loop. Defense-in-depth:
+  with stable input bytes the second pass walks the same
+  validated path as the first, but the bound is now explicit.
+
+### Tests
+
+- New `tests/jsonrpc.tcyr` cases for F-1 (oversized
+  Content-Length → -1).
+- New `tests/lsp_diags.tcyr` cases for F-2 (line / severity
+  with 20-digit values → capped) and F-3 (truncated body
+  between passes → 0).
+
 ## [1.0.0] — 2026-05-06
 
 **Public API freeze.** cyim-lsp 1.0.0 freezes the public surface
@@ -19,9 +55,12 @@ through end-to-end LSP behaviour:
 - v0.4.0 — document sync, didOpen / didChange / didSave (M3)
 - v0.5.0 — diagnostic counts via status_segment (M4)
 - v0.5.1 — inline diag highlighting via diagnostic_provider (M5)
-- v0.6.0 — navigation: `:lsp-goto-def`, `:lsp-find-refs` (M6)
-- v0.7.0 — closeout audit (M7)
-- v1.0.0 — **freeze**
+- v1.0.0 — **navigation (M6) + closeout (M7) + freeze**
+
+This entry consolidates v0.6.0 (navigation), v0.7.0 (closeout
+verification), and the v1.0.0 freeze itself. All three were cut
+in the same session; folding them into one release entry keeps
+the ledger honest about what actually shipped to consumers.
 
 ### Frozen surface
 
@@ -38,10 +77,135 @@ across cyim-lsp 1.x. Additions allowed; breaking changes need
   envelope (stable across 1.x; additions allowed; breaking
   changes need 2.x). Three alternatives considered + rejected
   (defer freeze, partial subset, no freeze).
+- **`src/lsp_position.cyr`** (160 lines) — buffer position
+  helpers + Location parser. `_lsp_pos_offset_to_lc` /
+  `_lc_to_offset` round-trip cyim's byte offsets ↔ LSP's
+  line+character. `_lsp_pos_extract_uri` /
+  `_extract_first_line` / `_extract_first_character` bytescan
+  the response body for the first Location's URI + range.start
+  fields. Supports Location and Location[] response shapes
+  (peeks first array element).
+- **Synchronous request/response helper** (`_lsp_request_sync`
+  in `src/lsp_client.cyr`). Sends a JSON-RPC request, polls
+  the drain loop until a response with the matching id arrives
+  or `max_iters` polling cycles elapse. Notifications
+  (publishDiagnostics) keep flowing through
+  `lsp_diags_handle_frame` during the wait.
+- **Navigation handlers** (`lsp_nav_goto_def`,
+  `lsp_nav_find_refs` in `src/lsp_documents.cyr`):
+  - `goto_def` sends `textDocument/definition`, parses the
+    Location response, jumps cursor for same-file results,
+    prints status for cross-file results (cross-file jump
+    deferred — needs cyim's `buf_load_file`-from-plugin-
+    context ABI).
+  - `find_refs` sends `textDocument/references`, counts
+    results via bytescan, prints "lsp: N references" in
+    status. Quickfix list integration deferred — needs cyim's
+    list-display ABI.
+- **Real `:lsp-restart` and `:lsp-status`** in
+  `src/plugin_init.cyr` (v0.1.0 stubs replaced).
+  `:lsp-restart` cleanly shuts down + respawns the server;
+  `:lsp-status` prints `lsp: cyrius-lsp pid=N` or
+  `lsp: (not attached)`.
+- **New ex-commands**: `:lsp-goto-def`, `:lsp-find-refs`. Both
+  registered in `cyim_lsp_init` alongside `:lsp-restart` /
+  `:lsp-status`.
+- **`tests/lsp_position.tcyr`** (140 lines, 38 assertions
+  across 10 groups) — offset↔lc round-trip across multi-line
+  buffers, lc-to-offset clamping, Location extract from single
+  + array response shapes + null result.
+- **First-party scaffold conformance.** cyim-lsp now matches
+  cyim's full project shape: `CONTRIBUTING.md`, `SECURITY.md`,
+  `CODE_OF_CONDUCT.md` at root; `docs/audit/` directory.
+  Closes the gap between `cyrius init` scaffold output and the
+  first-party documentation standard.
+- **Version-anchoring.** `scripts/version-bump.sh` +
+  auto-generated `src/version_str.cyr` mirror cyim's pattern.
+  The standalone CLI banner reads from a generated var instead
+  of a hardcoded literal, so `VERSION` is the single source of
+  truth — no drift possible.
+- **Security audit.**
+  [`docs/audit/2026-05-06-audit.md`](docs/audit/2026-05-06-audit.md)
+  — first-pass internal review + 2025-era LSP/JSON-parser CVE
+  corpus survey. Result: 0 CRITICAL / 0 HIGH / 0 MEDIUM; 3 LOW
+  (all defense-in-depth, all triaged for v1.0.1 — Content-
+  Length overflow cap, diag-int overflow cap, second-pass
+  string bound).
 
 ### Changed
 
-- VERSION 0.7.0 → 1.0.0. No source changes.
+- **`cyrius.cyml [lib].modules`** reorder: `lsp_diags.cyr`
+  moved before `lsp_client.cyr` so `_lsp_response_handler` can
+  reference `_lsp_diags_find` / `_lsp_diag_parse_int`. Added
+  `lsp_position.cyr` between `lsp_state` and `lsp_documents`.
+- **`src/main.cyr`** — added `include "src/lsp_diags.cyr"` so
+  the standalone build chain matches the new dist concat order.
+- VERSION 0.5.1 → 1.0.0. M6 navigation source landed in this
+  cut; M7 closeout verification + the v1.0.0 freeze layered
+  over it as documentation-only steps.
+
+### Closeout verification (M7)
+
+All checks per the cyim project's closeout convention passed:
+
+1. **Full test + fuzz from clean** (`rm -rf build && cyrius
+   deps && cyrius build`): 7 test suites all PASS (164
+   assertions), `cyrius fuzz` 1 harness PASS, `cyrius lint` 0
+   warnings.
+2. **Dead-code audit**: 30 source-side functions DCE-stripped
+   from the standalone build — ALL intentional public plugin
+   ABI consumed only at fold-in into cyim. The floor below is
+   the surface v1.0.0 freezes.
+3. **Refactor pass**: nothing warranted consolidation. Eight
+   library files (jsonrpc / subprocess / lsp_diags / lsp_client
+   / lsp_state / lsp_position / lsp_documents / plugin_init),
+   each tight and single-purpose.
+4. **Code review** of `0.1.0..HEAD` (~2500 net inserted lines
+   across 8 source files): no missed guards, off-by-ones,
+   silently-ignored errors. The brace-depth walker bug at
+   v0.5.1 was caught + fixed in-cycle.
+5. **Cleanup sweep**: no stale comments, no orphaned files,
+   no unused includes.
+6. **Security re-scan**: no `sys_system` / `popen` / `setuid`
+   / `setgid`. The two `exec*` hits are `_lsp_proc_exec` (our
+   own subprocess fork+exec helper). All `sys_read` /
+   `sys_write` sites in `subprocess.cyr` propagate return
+   values to callers (correct pattern, not "unchecked"). The
+   full audit at `docs/audit/2026-05-06-audit.md` extends this
+   re-scan with the 2025 CVE corpus.
+7. **Doc sync**: CHANGELOG / state.md / roadmap.md all current.
+8. **Version verify**: VERSION 1.0.0, CHANGELOG header,
+   intended git tag `1.0.0` all match.
+9. **Full clean build**: passed.
+
+### Dead-code floor (v1.0.0)
+
+The standalone build (`cyrius build src/main.cyr`) DCE-strips
+30 functions — all intentional public plugin ABI consumed only
+when the distfile gets folded into cyim's compilation unit:
+
+**Framing (`jsonrpc.cyr`)**: `_jr_append`, `_jr_itoa`,
+`_jr_frame`, `jsonrpc_next_id`,
+`jsonrpc_build_notification`, `jsonrpc_build_request`,
+`jsonrpc_parse_frame`.
+
+**Subprocess (`subprocess.cyr`)**: `_lsp_proc_exec`,
+`lsp_proc_spawn`, `lsp_proc_send`, `lsp_proc_recv`,
+`lsp_proc_close`, `lsp_proc_kill`, `lsp_proc_set_nonblock`,
+`lsp_proc_recv_nb`.
+
+**Diagnostics (`lsp_diags.cyr`)**: `lsp_diags_count`,
+`lsp_diag_tuple_line`, `lsp_diag_tuple_severity`,
+`lsp_diag_tuple_msg`, `lsp_diags_entry_count`,
+`lsp_diags_entry_tuple`, `_lsp_diags_itoa_into`,
+`_lsp_diags_emit_cat`, `lsp_diags_format_status`.
+
+**Client (`lsp_client.cyr`)**: `lsp_client_proc`,
+`_lsp_recv_frame`, `_lsp_send_all`, `_lsp_initialize`,
+`_lsp_drain_frames`, `_lsp_request_sync`.
+
+Future minors may add to this list (additions allowed);
+breaking changes wait for v2.0.
 
 ### cyim 1.4.0 pickup
 
@@ -88,178 +252,19 @@ All listed in ADR 0001's "Subject to expansion" envelope —
 
 ### Tests
 
-- `cyrius test` 7 suites, **164 assertions all PASS**.
-- `cyrius fuzz` 1 PASS.
-- `cyrius lint` 0 warnings.
-
-### Binary / dist
-
-- `dist/cyim-lsp.cyr` — 2547 lines (unchanged from v0.6.0; the
-  v0.7.0 closeout + v1.0.0 freeze are documentation-only).
-
-## [0.7.0] — 2026-05-06
-
-M7 — closeout pass before v1.0.0 API freeze. No source changes;
-pure verification + dead-code-floor record + doc sync. The v0.x
-ABI work (v0.1.0 scaffold → v0.6.0 navigation) is now closed
-out and v1.0.0 has a clean base for the API freeze + cyim 1.4.0
-pickup.
-
-### Closeout audit summary
-
-All checks per the cyim project's closeout convention passed:
-
-1. **Full test + fuzz from clean** (`rm -rf build && cyrius
-   deps && cyrius build`): 7 test suites all PASS (164
-   assertions), `cyrius fuzz` 1 harness PASS, `cyrius lint` 0
-   warnings.
-2. **Dead-code audit**: 30 source-side functions DCE-stripped
-   from the standalone build — ALL intentional public plugin
-   ABI consumed at fold-in into cyim (registry registrations,
-   diag accessors, position helpers, etc.). v0.7.0 records
-   the floor below; no removals — these are the public surface
-   v1.0.0 freezes.
-3. **Refactor pass**: nothing warranted consolidation. Six
-   library files (jsonrpc / subprocess / lsp_diags / lsp_client
-   / lsp_state / lsp_position / lsp_documents / plugin_init),
-   each tight and single-purpose.
-4. **Code review** of `0.1.0..HEAD` (~2500 net inserted lines
-   across 8 source files): no missed guards, off-by-ones,
-   silently-ignored errors. The brace-depth walker bug at
-   v0.5.1 was caught + fixed in-cycle.
-5. **Cleanup sweep**: no stale comments, no orphaned files,
-   no unused includes. Two test scaffold files
-   (`tests/cyim-lsp.bcyr`, `tests/cyim-lsp.fcyr`) remain from
-   `cyrius init` — kept as legacy markers.
-6. **Security re-scan**: no `sys_system` / `popen` /
-   `setuid` / `setgid`. The two `exec*` hits are
-   `_lsp_proc_exec` (our own subprocess fork+exec helper).
-   Three `sys_read` / `sys_write` sites in subprocess.cyr —
-   all return values to caller for handling (correct pattern,
-   not "unchecked").
-7. **Doc sync**: CHANGELOG / state.md / roadmap.md all
-   current and consistent through this entry.
-8. **Version verify**: VERSION 0.7.0, CHANGELOG header,
-   intended git tag `0.7.0` all match.
-9. **Full clean build**: passed.
-
-### Dead-code floor (v0.7.0)
-
-The standalone build (`cyrius build src/main.cyr`) DCE-strips
-30 functions — all intentional public plugin ABI consumed only
-when the distfile gets folded into cyim's compilation unit:
-
-**Framing (jsonrpc.cyr)**: `_jr_append`, `_jr_itoa`, `_jr_frame`,
-`jsonrpc_next_id`, `jsonrpc_build_notification`,
-`jsonrpc_build_request`, `jsonrpc_parse_frame`.
-
-**Subprocess (subprocess.cyr)**: `_lsp_proc_exec`, `lsp_proc_spawn`,
-`lsp_proc_send`, `lsp_proc_recv`, `lsp_proc_close`,
-`lsp_proc_kill`, `lsp_proc_set_nonblock`, `lsp_proc_recv_nb`.
-
-**Diagnostics (lsp_diags.cyr)**: `lsp_diags_count`,
-`lsp_diag_tuple_line`, `lsp_diag_tuple_severity`,
-`lsp_diag_tuple_msg`, `lsp_diags_entry_count`,
-`lsp_diags_entry_tuple`, `_lsp_diags_itoa_into`,
-`_lsp_diags_emit_cat`, `lsp_diags_format_status`.
-
-**Client (lsp_client.cyr)**: `lsp_client_proc`, `_lsp_recv_frame`,
-`_lsp_send_all`, `_lsp_initialize`, `_lsp_drain_frames`,
-`_lsp_request_sync`.
-
-These are the surface v1.0.0 freezes. Future minors may add to
-this list (additions allowed); breaking changes wait for v2.0.
-
-### Notes
-
-- **No source changes.** Pure verification cut.
-- **Cyrius pin unchanged** at 5.9.16.
-- **Path to v1.0.0**: ADR 0001 formalising the public surface
-  + a final cut. cyim 1.4.0 picks up the v1.0.0 frozen
-  contract.
-
-## [0.6.0] — 2026-05-06
-
-M5 — navigation. cyim-lsp now answers go-to-definition and
-find-references queries. v0.6.0 ships these via **ex-commands**
-rather than `gd` / `gr` keymaps because cyim's plugin-prefix-
-keymap ABI for `g`-prefix sequences isn't yet wired through
-`plugin_register_normal_key`. Ex-command form uses the already-
-wired `ex_command` hook surface; users type `:lsp-goto-def`
-or `:lsp-find-refs` in command mode.
-
-### Added
-
-- **`src/lsp_position.cyr`** (160 lines) — buffer position
-  helpers + Location parser. `_lsp_pos_offset_to_lc` /
-  `_lc_to_offset` round-trip cyim's byte offsets ↔ LSP's
-  line+character. `_lsp_pos_extract_uri` / `_extract_first_line`
-  / `_extract_first_character` bytescan the response body for
-  the first Location's URI + range.start fields. Supports
-  Location and Location[] response shapes (peeks first array
-  element).
-- **Synchronous request/response helper** (`_lsp_request_sync`
-  in `src/lsp_client.cyr`). Sends a JSON-RPC request, polls the
-  drain loop until a response with the matching id arrives or
-  `max_iters` polling cycles elapse. Notifications
-  (publishDiagnostics) keep flowing through `lsp_diags_handle_frame`
-  during the wait.
-- **Navigation handlers** (`lsp_nav_goto_def`,
-  `lsp_nav_find_refs` in `src/lsp_documents.cyr`):
-  - `goto_def` sends `textDocument/definition`, parses the
-    Location response, jumps cursor for same-file results,
-    prints status for cross-file results (cross-file jump
-    deferred to v0.6.x — needs cyim's `buf_load_file`-from-
-    plugin-context ABI).
-  - `find_refs` sends `textDocument/references`, counts
-    results via bytescan, prints "lsp: N references" in
-    status. v0.6.x will populate a quickfix list once cyim
-    has list-display ABI.
-- **Real `:lsp-restart` and `:lsp-status`** in
-  `src/plugin_init.cyr` (v0.1.0 stubs replaced). `:lsp-restart`
-  cleanly shuts down + respawns the server; `:lsp-status`
-  prints `lsp: cyrius-lsp pid=N` or `lsp: (not attached)`.
-- **New ex-commands**: `:lsp-goto-def`, `:lsp-find-refs`. Both
-  registered in `cyim_lsp_init` alongside the existing
-  `:lsp-restart` / `:lsp-status`.
-- **`tests/lsp_position.tcyr`** (140 lines, 38 assertions
-  across 10 groups) — offset↔lc round-trip across multi-line
-  buffers, lc-to-offset clamping, Location extract from single
-  + array response shapes + null result.
-
-### Changed
-
-- **`cyrius.cyml [lib].modules`** reorder: lsp_diags.cyr
-  moved before lsp_client.cyr so `_lsp_response_handler` can
-  reference `_lsp_diags_find` / `_lsp_diag_parse_int`. Also
-  added `lsp_position.cyr` between lsp_state and lsp_documents.
-- **`src/main.cyr`** — added `include "src/lsp_diags.cyr"` so
-  the standalone build chain matches the new dist concat order.
-
-### Deferred (deliberate v0.6.0 cuts)
-
-- **`gd` / `gr` keymaps**: cyim's plugin-prefix-keymap ABI for
-  `g`-prefix sequences isn't wired. Ex-commands work today;
-  keymaps land when cyim 1.4.x extends the dispatch.
-- **Cross-file definition jumps**: response URI parsed but
-  jump only happens for same-file. Cross-file needs cyim's
-  `buf_load_file`-from-plugin ABI.
-- **Reference list UI**: counts shown in status, not a
-  navigable list. Quickfix integration in v0.6.x.
-
-### Tests
-
-- `cyrius test` 7 suites: cyim-lsp.tcyr 2 + jsonrpc.tcyr 21 +
-  subprocess.tcyr 15 + lsp_documents.tcyr 39 + lsp_diags.tcyr
-  43 + **lsp_position.tcyr 38** (new) + src/test.cyr 6. Total
-  164 assertions, all PASS.
+- `cyrius test` 7 suites, **164 assertions all PASS**:
+  cyim-lsp.tcyr 2, jsonrpc.tcyr 21, subprocess.tcyr 15,
+  lsp_documents.tcyr 39, lsp_diags.tcyr 43,
+  lsp_position.tcyr 38 (new this cut), src/test.cyr 6.
 - `cyrius fuzz` 1 PASS · `cyrius lint` 0 warnings.
 
 ### Binary / dist
 
 - `dist/cyim-lsp.cyr` 2045 → 2547 lines (+502). Position
   helpers + sync request/response + navigation handlers + real
-  restart/status/goto/refs ex-commands.
+  restart/status/goto/refs ex-commands account for the delta.
+  v0.7.0 closeout + v1.0.0 freeze + v1.0.0 conformance work
+  are documentation-only and don't change the distfile.
 
 ## [0.5.1] — 2026-05-06
 
