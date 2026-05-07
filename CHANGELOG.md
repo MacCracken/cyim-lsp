@@ -4,6 +4,68 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.3] — 2026-05-07
+
+**Subprocess env passthrough — fixes broken `lsp_client_start_default()`.**
+
+v1.0.0–v1.0.2 spawned cyrius-lsp with an empty environment
+(`var envp[1]; store64(&envp, 0)`). The intent was a defensive
+"don't leak env" posture; the cost was that `/usr/bin/env cyrius-lsp`
+— the PATH-lookup invocation `lsp_client_start_default()` uses —
+couldn't resolve cyrius-lsp because the child had no `PATH`. The
+default start path silently failed in any real consumer environment.
+
+Surfaced by [cyim's first end-to-end smoke harness](https://github.com/MacCracken/cyim/blob/main/tests/smcyr/lsp_fold.smcyr)
+(part of cyim 1.4.1 — runs under `cyrius smoke`); existing tcyr
+coverage missed this because `tests/subprocess.tcyr` mocks with
+`/bin/cat` (absolute path, no PATH lookup).
+
+### Fixed
+
+- `_lsp_proc_exec(cmd, arg1, arg2)` in `src/subprocess.cyr` now
+  populates `envp` from `/proc/self/environ` before calling
+  `sys_execve`. The child inherits cyim's full environment —
+  `PATH`, `HOME`, XDG, etc. `/usr/bin/env cyrius-lsp` now
+  resolves correctly.
+- New helper `_lsp_proc_envp_from_self()` — reads
+  `/proc/self/environ` (64 KB cap), counts NUL-separated
+  entries, allocates an `(nentries + 1) * 8` byte envp array
+  with pointers into the buffer + NULL terminator.
+- Fallback path: if `/proc/self/environ` read fails or alloc
+  returns 0, falls back to empty envp (preserves the old behaviour
+  for absolute-path commands like the `tests/subprocess.tcyr`
+  `/bin/cat` mock).
+
+### Security framing (corrects v1.0.0 audit)
+
+[`docs/audit/2026-05-06-audit.md` § 5 "No command injection"](docs/audit/2026-05-06-audit.md)
+classified empty-envp as "refused by design." That framing
+conflated argv hygiene (the actual command-injection defense —
+`sys_execve` with explicit argv, never `sys_system`) with envp
+scope. envp scope provides no command-injection protection;
+argv hygiene does, and v1.0.0+ already enforces it.
+
+Per cyim ADR 0001's trust model (single-user, not a privilege
+boundary), env passthrough is appropriate. v1.0.3's audit
+amendment notes this. Argv hygiene unchanged: `lsp_proc_spawn`
+still calls `sys_execve` with explicit argv `[cmd, arg1?, arg2?, NULL]`
+built from trusted-config strings; no shell metachar interpretation.
+
+### Tests
+
+- `cyrius test` — 7 suites, **174 assertions PASS** (unchanged
+  from v1.0.2; the change is environment-side, behaviour-neutral
+  for the existing test set which uses absolute-path mocks).
+- `cyrius fuzz` — 1 PASS · `cyrius lint` — 0 warnings.
+- `dist/cyim-lsp.cyr` regenerated, 2228 lines (was 2163 at
+  v1.0.2; +65 for `_lsp_proc_envp_from_self` + comment).
+
+### Verified externally
+
+- cyim 1.4.1's `tests/smcyr/lsp_fold.smcyr` exercises
+  `lsp_client_start_default()` end-to-end against a real
+  cyrius-lsp; passes after the env fix, failed before.
+
 ## [1.0.2] — 2026-05-07
 
 **Bundle shape correction. Fixes the v1.0.0 misship where

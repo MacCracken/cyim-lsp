@@ -5,6 +5,16 @@
 
 ## Version
 
+**1.0.3** — Subprocess env passthrough shipped 2026-05-07.
+`_lsp_proc_exec` now populates `envp` from `/proc/self/environ`
+so children inherit cyim's full environment. Fixes the broken
+`/usr/bin/env cyrius-lsp` lookup that v1.0.0–v1.0.2's empty
+envp caused. Surfaced by cyim 1.4.1's `tests/smcyr/lsp_fold.smcyr`
+end-to-end smoke. Audit doc § 5 framing corrected (envp scope
+isn't a command-injection defense — argv hygiene is, unchanged).
+174 assertions still PASS, fuzz/lint clean. Distfile +65 lines
+(2163 → 2228) for the new helper.
+
 **1.0.2** — Bundle shape correction shipped 2026-05-07. The v1.0.0
 freeze listed `cyim_lsp_init()` and the six hook callbacks as
 frozen `[lib]` exports; they were never viable bundle exports
