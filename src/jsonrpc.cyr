@@ -217,6 +217,11 @@ fn jsonrpc_parse_frame(buf, len, off_out, len_out) {
                 if (c < 48) { return 0 - 1; }
                 if (c > 57) { return 0 - 1; }
                 n = n * 10 + (c - 48);
+                # F-1 (audit 2026-05-06): cap at 16 MB. Matches the
+                # _lsp_recv_frame buffer cap upstream; anything larger
+                # is rejected before integer overflow can wrap `n` to
+                # a negative value and bypass the body-length guard.
+                if (n > 16777216) { return 0 - 1; }
                 any_digit = 1;
                 k = k + 1;
             }

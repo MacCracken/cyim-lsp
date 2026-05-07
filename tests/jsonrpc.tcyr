@@ -165,6 +165,35 @@ fn main() {
     # Notifications don't consume an id
     assert_eq(post - pre, 1, "notification did not advance id counter");
 
+    test_group("v1.0.1 F-1: oversized Content-Length rejected (no integer overflow)");
+    # 20 digits; without the cap, n overflows i64 to negative and
+    # `body_start + n > len` would silently pass.
+    var huge = "Content-Length: 99999999999999999999\r\n\r\n{}";
+    var s_huge_off[8];
+    store64(&s_huge_off, 0);
+    var s_huge_len[8];
+    store64(&s_huge_len, 0);
+    var rc_huge = jsonrpc_parse_frame(huge, strlen(huge), &s_huge_off, &s_huge_len);
+    assert_eq(rc_huge, 0 - 1, "20-digit Content-Length -> -1");
+
+    test_group("v1.0.1 F-1: Content-Length at 16 MB cap is accepted (incomplete)");
+    var atcap = "Content-Length: 16777216\r\n\r\n";
+    var s_at_off[8];
+    store64(&s_at_off, 0);
+    var s_at_len[8];
+    store64(&s_at_len, 0);
+    var rc_at = jsonrpc_parse_frame(atcap, strlen(atcap), &s_at_off, &s_at_len);
+    assert_eq(rc_at, 0, "16777216 -> incomplete (cap not exceeded)");
+
+    test_group("v1.0.1 F-1: Content-Length one over cap is rejected");
+    var over = "Content-Length: 16777217\r\n\r\n";
+    var s_ov_off[8];
+    store64(&s_ov_off, 0);
+    var s_ov_len[8];
+    store64(&s_ov_len, 0);
+    var rc_ov = jsonrpc_parse_frame(over, strlen(over), &s_ov_off, &s_ov_len);
+    assert_eq(rc_ov, 0 - 1, "16777217 -> malformed");
+
     return assert_summary();
 }
 

@@ -172,6 +172,19 @@ fn main() {
     lsp_diags_handle_frame(pd_second, strlen(pd_second));
     assert_eq(lsp_diags_entry_count(lsp_diags_lookup("file:///r.cyr")), 0, "after re-publish: tuples gone");
 
+    test_group("v1.0.1 F-2: oversized line value capped (no integer overflow)");
+    # 20-digit line value; without F-2 cap, n overflows i64 and the
+    # resulting tuple's line is whatever junk falls out. With cap,
+    # line = 100M + 1 (capped value plus LSP-0->cyim-1 indexing).
+    var pd_huge = "{\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"file:///h.cyr\",\"diagnostics\":[{\"range\":{\"start\":{\"line\":99999999999999999999,\"character\":0},\"end\":{\"line\":99999999999999999999,\"character\":1}},\"severity\":1,\"message\":\"big\"}]}}";
+    lsp_diags_handle_frame(pd_huge, strlen(pd_huge));
+    var eh = lsp_diags_lookup("file:///h.cyr");
+    assert_neq(eh, 0, "entry created");
+    assert_eq(lsp_diags_entry_count(eh), 1, "1 tuple extracted");
+    var th = lsp_diags_entry_tuple(eh, 0);
+    assert_eq(lsp_diag_tuple_line(th), 100000001, "line capped at 100M+1");
+    assert_eq(lsp_diag_tuple_severity(th), 1, "severity unchanged");
+
     return assert_summary();
 }
 

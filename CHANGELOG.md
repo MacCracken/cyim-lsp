@@ -4,7 +4,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [1.0.1] — TBD
+## [1.0.1] — 2026-05-06
 
 Audit-finding repairs from the v1.0.0 pre-freeze security pass
 ([`docs/audit/2026-05-06-audit.md`](docs/audit/2026-05-06-audit.md)).
@@ -18,27 +18,41 @@ parser invariants.
 - **F-1 — Content-Length integer overflow.** `jsonrpc_parse_frame`
   in `src/jsonrpc.cyr` now caps the parsed Content-Length at
   16 MB (matching `_lsp_recv_frame`'s buffer cap) and returns
-  `-1` (malformed) if a server's header digits would exceed
-  it. Closes the contract gap where a malicious server could
-  send `Content-Length: 99999999999999999999\r\n\r\n…` and
-  overflow `n` to a negative value.
+  `-1` (malformed) if a server's header digits would push the
+  accumulator past the cap. Closes the contract gap where a
+  malicious server could send
+  `Content-Length: 99999999999999999999\r\n\r\n…` and overflow
+  `n` to a negative value.
 - **F-2 — Diagnostic integer overflow.** `_lsp_diag_parse_int`
   in `src/lsp_diags.cyr` caps line / severity values at 100M
   (LSP coords are non-negative; 100M dwarfs any real file).
-  Same overflow shape as F-1.
+  Loop stops at the cap so further digits don't wrap `n`
+  negative.
 - **F-3 — String parser second-pass bound.** Mirror first
   pass's `if (rp >= blen) { return 0; }` guard at the top of
   `_lsp_diag_parse_string`'s second loop. Defense-in-depth:
   with stable input bytes the second pass walks the same
-  validated path as the first, but the bound is now explicit.
+  validated path as the first, but the bound is now explicit
+  — protects against any future buf mutation between passes.
 
 ### Tests
 
-- New `tests/jsonrpc.tcyr` cases for F-1 (oversized
-  Content-Length → -1).
-- New `tests/lsp_diags.tcyr` cases for F-2 (line / severity
-  with 20-digit values → capped) and F-3 (truncated body
-  between passes → 0).
+- `tests/jsonrpc.tcyr` 21 → 24 assertions (+3 for F-1: oversized
+  Content-Length → -1, at-16-MB-cap incomplete, one-over-cap
+  → -1).
+- `tests/lsp_diags.tcyr` 43 → 47 assertions (+4 for F-2: 20-digit
+  line value capped at 100M+1, severity unchanged, entry / tuple
+  shape preserved).
+- F-3 has no behavioural test — it's a structural defense
+  exercising the existing 47 string-parser tests as the
+  regression net. All pass.
+- `cyrius test` 7 suites, **171 assertions all PASS** (was 164).
+- `cyrius fuzz` 1 PASS · `cyrius lint` 0 warnings.
+
+### Changed
+
+- VERSION 1.0.0 → 1.0.1.
+- `dist/cyim-lsp.cyr` regenerated from the patched sources.
 
 ## [1.0.0] — 2026-05-06
 
