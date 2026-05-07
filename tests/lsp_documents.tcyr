@@ -1,30 +1,15 @@
-# tests/lsp_documents.tcyr — document-sync helpers (v0.4.0)
+# tests/lsp_documents.tcyr — document-sync helpers
 #
 # Tests the pure helpers in src/lsp_documents.cyr — JSON-string
 # escape, URI construction, .cyr filter, decimal itoa, message
-# body builders. These don't need cyim's plugin ABI; the
-# handlers (lsp_doc_did_change / lsp_doc_did_save) reference
-# `editor_buf` / `editor_file_path` / `buf_len` / `buf_get`
-# which only resolve at fold-in into cyim. We stub those four
-# here just to satisfy compilation; they're never called by
-# the assertions below.
-#
-# Integration tests against real cyim land in cyim 1.4.0
-# (driving cyim with cyim-lsp folded in).
+# body builders. v1.0.2: no consumer-side ABI stubs needed since
+# lsp_documents.cyr is now fully self-contained (ADR 0001
+# amendment).
 
 include "src/jsonrpc.cyr"
 include "src/subprocess.cyr"
 include "src/lsp_client.cyr"
 include "src/lsp_state.cyr"
-
-# Stub cyim plugin ABI symbols. These exist only to make the
-# standalone build compile lsp_documents.cyr; the test never
-# invokes the handler functions that would call them.
-fn editor_buf(s)         { return 0; }
-fn editor_file_path(s)   { return 0; }
-fn buf_len(b)            { return 0; }
-fn buf_get(b, i)         { return 0; }
-
 include "src/lsp_documents.cyr"
 
 # Compare a NUL-term cstring against an expected literal.
@@ -40,21 +25,9 @@ fn _streq(a, b) {
     return 0;
 }
 
-# Compare buf bytes [0, n) against expected literal of length n.
-fn _bytes_eq(buf, expected, n) {
-    var i = 0;
-    while (i < n) {
-        if (load8(buf + i) != load8(expected + i)) { return 0; }
-        i = i + 1;
-    }
-    return 1;
-}
-
 # Build a single-byte source, run JSON escape, return the
 # escaped output as a cstring.
 fn _esc_one_byte(c) {
-    var src[1];
-    store8(&src, c);
     var dst = alloc(8);
     var o = _lsp_jesc_byte(c, dst, 0, 8);
     if (o < 0) { return 0; }
@@ -84,18 +57,24 @@ fn main() {
     assert_eq(_streq(_esc_one_byte(32),  " "), 1, "' ' -> ' '");
     assert_eq(_streq(_esc_one_byte(126), "~"), 1, "'~' -> '~'");
 
-    test_group("_lsp_path_to_uri prepends file://");
-    var uri = _lsp_path_to_uri("/foo/bar.cyr");
+    test_group("lsp_content_to_json_string: full-buffer escape");
+    var raw = "ab\n\"c";
+    var esc = lsp_content_to_json_string(raw, 5);
+    assert_neq(esc, 0, "escape returns non-null");
+    assert_eq(_streq(esc, "ab\\n\\\"c"), 1, "ab<LF>\"c -> ab\\n\\\"c");
+
+    test_group("lsp_path_to_uri prepends file://");
+    var uri = lsp_path_to_uri("/foo/bar.cyr");
     assert_eq(_streq(uri, "file:///foo/bar.cyr"), 1, "absolute path -> file://...");
 
-    test_group("_lsp_path_is_cyr filter");
-    assert_eq(_lsp_path_is_cyr("foo.cyr"), 1, "foo.cyr -> 1");
-    assert_eq(_lsp_path_is_cyr("/abs/path.cyr"), 1, "absolute .cyr -> 1");
-    assert_eq(_lsp_path_is_cyr("foo.txt"), 0, "foo.txt -> 0");
-    assert_eq(_lsp_path_is_cyr("foo"), 0, "no extension -> 0");
-    assert_eq(_lsp_path_is_cyr(""), 0, "empty -> 0");
-    assert_eq(_lsp_path_is_cyr("a.c"), 0, "too short -> 0");
-    assert_eq(_lsp_path_is_cyr(".cyr"), 1, "bare .cyr -> 1");
+    test_group("lsp_path_is_cyr filter");
+    assert_eq(lsp_path_is_cyr("foo.cyr"), 1, "foo.cyr -> 1");
+    assert_eq(lsp_path_is_cyr("/abs/path.cyr"), 1, "absolute .cyr -> 1");
+    assert_eq(lsp_path_is_cyr("foo.txt"), 0, "foo.txt -> 0");
+    assert_eq(lsp_path_is_cyr("foo"), 0, "no extension -> 0");
+    assert_eq(lsp_path_is_cyr(""), 0, "empty -> 0");
+    assert_eq(lsp_path_is_cyr("a.c"), 0, "too short -> 0");
+    assert_eq(lsp_path_is_cyr(".cyr"), 1, "bare .cyr -> 1");
 
     test_group("_lsp_doc_itoa decimal conversion");
     assert_eq(_streq(_lsp_doc_itoa(0),    "0"),    1, "0");
@@ -118,6 +97,19 @@ fn main() {
     var p3 = _lsp_doc_build_did_save_params("file:///x.cyr");
     var expected3 = "{\"textDocument\":{\"uri\":\"file:///x.cyr\"}}";
     assert_eq(_streq(p3, expected3), 1, "exact JSON body");
+
+    test_group("_lsp_nav_build_params has expected JSON shape");
+    var p4 = _lsp_nav_build_params("file:///x.cyr", 7, 2);
+    var expected4 = "{\"textDocument\":{\"uri\":\"file:///x.cyr\"},\"position\":{\"line\":7,\"character\":2}}";
+    assert_eq(_streq(p4, expected4), 1, "nav params shape");
+
+    test_group("lsp_streq");
+    assert_eq(lsp_streq("foo", "foo"), 1, "equal");
+    assert_eq(lsp_streq("foo", "bar"), 0, "different");
+    assert_eq(lsp_streq("foo", "foobar"), 0, "prefix");
+    assert_eq(lsp_streq("", ""), 1, "both empty");
+    assert_eq(lsp_streq(0, "foo"), 0, "null lhs");
+    assert_eq(lsp_streq("foo", 0), 0, "null rhs");
 
     test_group("lsp_state vec lookup / create / version-bump");
     lsp_state_init();

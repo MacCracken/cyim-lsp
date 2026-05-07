@@ -9,9 +9,10 @@
 ## Project Identity
 
 **cyim-lsp** — LSP client plugin for cyim. Spawns `cyrius-lsp` as
-a subprocess, frames JSON-RPC over pipes, and routes diagnostics
-/ didSave / didChange / definition / references through cyim's
-plugin ABI (frozen at cyim 1.3.6 / [ADR 0004](https://github.com/MacCracken/cyim/blob/main/docs/adr/0004-plugin-abi-freeze.md)).
+a subprocess, frames JSON-RPC over pipes, and exposes a
+self-contained pure-protocol bundle that cyim folds in via the
+sandhi pattern. Consumer-side hook registration lives in cyim's
+own glue file (reference: `docs/examples/cyim_glue.cyr`).
 
 - **Type**: Plugin distfile (sandhi pattern). Standalone build is
   for ad-hoc smoke; production shipping is via `cyrius distlib` →
@@ -19,8 +20,10 @@ plugin ABI (frozen at cyim 1.3.6 / [ADR 0004](https://github.com/MacCracken/cyim
 - **License**: GPL-3.0-only
 - **Language**: Cyrius (toolchain pinned in `cyrius.cyml [package].cyrius`)
 - **Version**: `VERSION` at the project root is the source of truth
-- **Consumes**: cyim's plugin ABI (all 6 hook types per cyim ADR
-  0003 §3); cyrius stdlib `json` + `process`
+- **Consumes**: cyrius stdlib (`json`, `process`, etc. — see
+  `cyrius.cyml [deps].stdlib`). The bundle has **zero references**
+  to consumer-side editor symbols. Specific cyim ABI version that
+  consumer-side glue targets lives in `docs/development/state.md`.
 - **Spawns**: cyrius-lsp from the cyrius toolchain
   (`programs/cyrius-lsp.cyr`); JSON-RPC 2.0 over stdin/stdout
   pipes
@@ -55,21 +58,32 @@ Project was scaffolded with `cyrius init cyim-lsp` (2026-05-06).
 
 ## Plugin shape (sandhi pattern)
 
+The `[lib].modules` bundle is **self-contained** — every symbol
+resolves against the listed modules + cyrius stdlib, with zero
+references to consumer-side editor symbols. This is the
+sandhi-pattern done correctly per
+[ADR 0001's v1.0.2 amendment](docs/adr/0001-api-freeze.md):
+the bundle drops cleanly into any consumer's TU without
+polluting downstream test builds.
+
 ```
-src/jsonrpc.cyr        # Content-Length framing helpers (no plugin
-                       # ABI references; self-contained)
-src/lsp_client.cyr     # LSP protocol handlers; references jsonrpc
-src/plugin_init.cyr    # cyim_lsp_init() registers cyim hooks;
-                       # references cyim's plugin ABI (resolves
-                       # only when bundled into cyim's TU)
+src/jsonrpc.cyr        # Content-Length framing, message build/parse
+src/subprocess.cyr     # pipe / fork / exec / dup2 primitives
+src/lsp_diags.cyr      # publishDiagnostics walker, per-URI tuples
+src/lsp_client.cyr     # LSP protocol (initialize, send, recv, drain)
+src/lsp_state.cyr      # per-buffer state vec (uses opaque buf key)
+src/lsp_position.cyr   # offset↔line/character on flat (ptr, len)
+src/lsp_documents.cyr  # didOpen / didChange / didSave / nav senders
 src/main.cyr           # standalone driver; NOT in [lib]
 ```
 
 `cyrius distlib` concatenates `[lib].modules` from `cyrius.cyml`
-into `dist/cyim-lsp.cyr` in dependency order
-(jsonrpc → lsp_client → plugin_init). cyim's
+into `dist/cyim-lsp.cyr` in dependency order. cyim's
 `include "lib/cyim-lsp.cyr"` brings the bundle into cyim's
-compilation unit at fold-in time.
+compilation unit at fold-in time. Consumer-side glue (cyim's
+hook registration, buffer materialization, response handling)
+lives in cyim's tree — see [`docs/examples/cyim_glue.cyr`](docs/examples/cyim_glue.cyr)
+for the reference shape.
 
 ## Quick Start
 
@@ -82,10 +96,17 @@ cyrius distlib                               # produce dist/cyim-lsp.cyr
 
 ## Key Principles
 
-- **The frozen ABI is load-bearing.** cyim 1.3.6's plugin ABI
-  freeze (cyim ADR 0004) is the contract this plugin builds
-  against. Don't reach into cyim internals beyond the documented
-  plugin_register_* / editor_* / buf_* surface.
+- **The bundle is self-contained.** Every symbol in
+  `[lib].modules` resolves against the bundle + cyrius stdlib,
+  with zero references to consumer-side editor symbols. If a
+  feature requires an editor-state read or write, that code
+  belongs in consumer-side glue (`docs/examples/cyim_glue.cyr`),
+  not the bundle. This is the load-bearing constraint that lets
+  the bundle drop into any consumer's TU.
+- **The cyim plugin ABI is consumed by glue, not by the bundle.**
+  Consumer-side glue calls `plugin_register_*` / `editor_*` /
+  `buf_*` per cyim's ADR 0003 / 0004. Specific cyim version
+  targeted lives in `docs/development/state.md`.
 - **Plugins extend the dispatch table, never the modal grammar.**
   Per cyim ADR 0003 — built-ins always win on conflict for
   keyed hooks (normal_key, ex_command); plugin lookup is reached

@@ -1,0 +1,372 @@
+# cyim_glue.cyr — reference consumer-side glue for cyim-lsp
+#
+# This file is the **consumer's** responsibility, not part of the
+# cyim-lsp [lib] bundle. The bundle (jsonrpc, subprocess,
+# lsp_client, lsp_state, lsp_diags, lsp_position, lsp_documents)
+# is genuinely self-contained: every symbol resolves against the
+# bundle + cyrius stdlib, with no references to consumer-side
+# editor symbols.
+#
+# Consumers (like cyim) provide a glue file that:
+#   1. Reads editor state via the host's plugin ABI
+#      (`editor_buf`, `editor_file_path`, `editor_cursor`,
+#      `editor_set_status`, `editor_set_cursor`).
+#   2. Reads buffer bytes via the host's buffer ABI
+#      (`buf_get`, `buf_len`) and materializes them into a flat
+#      (content_ptr, content_len) snapshot.
+#   3. Calls into cyim-lsp's pure-protocol API
+#      (`lsp_doc_send_*`, `lsp_nav_request_sync`, `lsp_pos_*`,
+#      `lsp_diags_*`).
+#   4. Parses responses and writes back via the host's editor-state
+#      setters.
+#
+# This file is for **cyim** specifically. Other editor consumers
+# (a hypothetical `aeed-lsp` for the AGNOS shell, etc.) write
+# their own glue against their own host ABI; the bundle stays
+# the same.
+#
+# To use: cyim copies this file (or its equivalent) to
+# `src/plugins/lsp_glue.cyr` and includes it from `src/main.cyr`
+# after `include "lib/cyim-lsp.cyr"` and the cyim plugin ABI
+# files. Then cyim's `main()` calls `cyim_lsp_init()` after
+# `plugin_init()`.
+#
+# Frozen-ABI dependencies on cyim's side (cyim ADR 0004):
+#   plugin_register_post_save_hook(fp)
+#   plugin_register_post_change_hook(fp)
+#   plugin_register_status_segment(fp)
+#   plugin_register_normal_key(key, fp)         -- not used at v1.0.2
+#   plugin_register_ex_command(name, fp)
+#   plugin_register_diagnostic_provider(fp)
+#   editor_buf(s) / editor_file_path(s) / editor_cursor(s)
+#   editor_set_status(s, msg, len) / editor_set_cursor(s, off)
+#   buf_get(b, i) / buf_len(b)
+#   diag_new(line, severity, msg) / vec_push(v, item)
+#   ACT_NONE / DIAG_ERROR / DIAG_WARNING / DIAG_INFO / DIAG_HINT
+
+# === Buffer materialization ===
+#
+# cyim-lsp's senders take flat (ptr, len) content. cyim's gap
+# buffer doesn't expose a flat pointer (the gap moves around),
+# so we copy bytes through `buf_get`. Returns a heap-alloc'd
+# buffer; caller doesn't free (cyrius's freelist reclaims at
+# next GC; for v1.0.x we accept the leak — typical edit sessions
+# generate few materializations).
+fn _cyim_buf_to_flat(b, len_out) {
+    if (b == 0) {
+        store64(len_out, 0);
+        return 0;
+    }
+    var blen = buf_len(b);
+    store64(len_out, blen);
+    if (blen == 0) {
+        var empty = alloc(1);
+        if (empty == 0) { return 0; }
+        store8(empty, 0);
+        return empty;
+    }
+    var dst = alloc(blen);
+    if (dst == 0) { return 0; }
+    var i = 0;
+    while (i < blen) {
+        store8(dst + i, buf_get(b, i));
+        i = i + 1;
+    }
+    return dst;
+}
+
+# === post_save hook ===
+
+fn _cyim_lsp_post_save(s, path) {
+    if (path == 0) { return 0; }
+    if (lsp_path_is_cyr(path) == 0) { return 0; }
+    if (lsp_doc_lazy_start() != 0) { return 0; }
+    var b = editor_buf(s);
+    if (b == 0) { return 0; }
+    var entry = lsp_state_lookup(b);
+    if (entry == 0) {
+        var uri = lsp_path_to_uri(path);
+        if (uri == 0) { return 0; }
+        entry = lsp_state_create(b, uri);
+        if (entry == 0) { return 0; }
+    }
+    if (lsp_state_is_opened(entry) == 0) {
+        # didSave before any change — emit didOpen first per LSP spec.
+        var clen_slot[8];
+        store64(&clen_slot, 0);
+        var content = _cyim_buf_to_flat(b, &clen_slot);
+        if (content == 0) { return 0 - 1; }
+        var rc = lsp_doc_send_did_open(entry, content, load64(&clen_slot));
+        if (rc != 0) { return rc; }
+    }
+    var uri = lsp_state_uri(entry);
+    return lsp_doc_send_did_save(uri);
+}
+
+# === post_change hook ===
+
+fn _cyim_lsp_post_change(s) {
+    var path = editor_file_path(s);
+    if (path == 0) { return 0; }                  # scratch buffer
+    if (lsp_path_is_cyr(path) == 0) { return 0; }
+    if (lsp_doc_lazy_start() != 0) { return 0; }
+    var b = editor_buf(s);
+    if (b == 0) { return 0; }
+    var entry = lsp_state_lookup(b);
+    if (entry == 0) {
+        var uri = lsp_path_to_uri(path);
+        if (uri == 0) { return 0; }
+        entry = lsp_state_create(b, uri);
+        if (entry == 0) { return 0; }
+    }
+    var clen_slot[8];
+    store64(&clen_slot, 0);
+    var content = _cyim_buf_to_flat(b, &clen_slot);
+    if (content == 0) { return 0 - 1; }
+    var clen = load64(&clen_slot);
+    if (lsp_state_is_opened(entry) == 0) {
+        return lsp_doc_send_did_open(entry, content, clen);
+    }
+    return lsp_doc_send_did_change(entry, content, clen);
+}
+
+# === status_segment hook ===
+#
+# Static buffer for the status-segment cstring. cyim's render
+# layer reads this byte-by-byte once per frame, so the buffer
+# can be reused. 64 bytes accommodates "E:NNN W:NNN I:NNN H:NNN"
+# with margin.
+var _cyim_lsp_status_buf[64];
+
+fn _cyim_lsp_status_segment(s) {
+    # Drain pending publishDiagnostics first — diagnostic_provider
+    # fires earlier in the same render frame but for v1.0.2 we
+    # keep drain here to avoid two read sweeps per frame.
+    if (lsp_client_running() != 0) {
+        _lsp_drain_frames(&lsp_diags_handle_frame);
+    }
+    var path = editor_file_path(s);
+    if (path == 0) { return 0; }
+    var uri = lsp_path_to_uri(path);
+    if (uri == 0) { return 0; }
+    var entry = lsp_diags_lookup(uri);
+    if (entry == 0) { return 0; }
+    var n = lsp_diags_format_status(entry, &_cyim_lsp_status_buf, 64);
+    if (n == 0) { return 0; }
+    return &_cyim_lsp_status_buf;
+}
+
+# === diagnostic_provider hook ===
+
+fn _cyim_lsp_diagnostic_provider(s, b, out_vec) {
+    if (out_vec == 0) { return 0; }
+    var path = editor_file_path(s);
+    if (path == 0) { return 0; }
+    var uri = lsp_path_to_uri(path);
+    if (uri == 0) { return 0; }
+    var entry = lsp_diags_lookup(uri);
+    if (entry == 0) { return 0; }
+    var n = lsp_diags_entry_count(entry);
+    var i = 0;
+    while (i < n) {
+        var t = lsp_diags_entry_tuple(entry, i);
+        if (t != 0) {
+            var line = lsp_diag_tuple_line(t);
+            var sev  = lsp_diag_tuple_severity(t);
+            var msg  = lsp_diag_tuple_msg(t);
+            # LSP severity 1=error..4=hint; cyim DIAG_* per ADR 0004.
+            var cyim_sev = DIAG_INFO;
+            if (sev == 1) { cyim_sev = DIAG_ERROR; }
+            if (sev == 2) { cyim_sev = DIAG_WARNING; }
+            if (sev == 3) { cyim_sev = DIAG_INFO; }
+            if (sev == 4) { cyim_sev = DIAG_HINT; }
+            if (msg == 0) { msg = "(no message)"; }
+            var d = diag_new(line, cyim_sev, msg);
+            if (d != 0) { vec_push(out_vec, d); }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# === Stubs for normal_key gd / gr ===
+#
+# Activate once cyim's plugin-prefix-keymap ABI lands. v1.0.2
+# users get navigation via :lsp-goto-def / :lsp-find-refs.
+
+fn _cyim_lsp_gd(s) { return ACT_NONE; }
+fn _cyim_lsp_gr(s) { return ACT_NONE; }
+
+# === ex-command hooks ===
+
+fn _cyim_lsp_ex_restart(s) {
+    if (lsp_client_running() == 0) {
+        if (lsp_client_start_default() == 0) {
+            editor_set_status(s, "lsp: started", 12);
+            return 0;
+        }
+        editor_set_status(s, "lsp: start failed", 17);
+        return 0 - 1;
+    }
+    lsp_client_stop();
+    if (lsp_client_start_default() == 0) {
+        editor_set_status(s, "lsp: restarted", 14);
+        return 0;
+    }
+    editor_set_status(s, "lsp: restart failed", 19);
+    return 0 - 1;
+}
+
+# Static buffer for :lsp-status output.
+var _cyim_lsp_status_msg[64];
+
+fn _cyim_lsp_ex_status(s) {
+    var d = lsp_client_describe();
+    var dl = strlen(d);
+    var prefix = "lsp: ";
+    var pl = strlen(prefix);
+    if (pl + dl > 63) { dl = 63 - pl; }
+    var i = 0;
+    while (i < pl) {
+        store8(&_cyim_lsp_status_msg + i, load8(prefix + i));
+        i = i + 1;
+    }
+    var j = 0;
+    while (j < dl) {
+        store8(&_cyim_lsp_status_msg + pl + j, load8(d + j));
+        j = j + 1;
+    }
+    store8(&_cyim_lsp_status_msg + pl + dl, 0);
+    editor_set_status(s, &_cyim_lsp_status_msg, pl + dl);
+    return 0;
+}
+
+# === :lsp-goto-def ===
+#
+# Sync buffer to server, send textDocument/definition request,
+# parse the first Location, jump cursor if same-file.
+
+fn _cyim_lsp_ex_goto_def(s) {
+    var path = editor_file_path(s);
+    if (path == 0) { return 0; }
+    if (lsp_path_is_cyr(path) == 0) { return 0; }
+    # Make sure the server has the latest content.
+    _cyim_lsp_post_change(s);
+    var b = editor_buf(s);
+    if (b == 0) { return 0; }
+    var clen_slot[8];
+    store64(&clen_slot, 0);
+    var content = _cyim_buf_to_flat(b, &clen_slot);
+    if (content == 0) { return 0 - 1; }
+    var clen = load64(&clen_slot);
+    var line_slot[8];
+    store64(&line_slot, 0);
+    var char_slot[8];
+    store64(&char_slot, 0);
+    lsp_pos_offset_to_lc(content, clen, editor_cursor(s), &line_slot, &char_slot);
+    var uri = lsp_path_to_uri(path);
+    if (uri == 0) { return 0 - 1; }
+    var blen_slot[8];
+    store64(&blen_slot, 0);
+    var resp = lsp_nav_request_sync(uri, load64(&line_slot), load64(&char_slot),
+                                    "textDocument/definition", &blen_slot);
+    if (resp == 0) {
+        editor_set_status(s, "lsp: no response from server", 28);
+        return 0 - 1;
+    }
+    var blen = load64(&blen_slot);
+    var dest_uri = lsp_pos_extract_uri(resp, blen);
+    if (dest_uri == 0) {
+        editor_set_status(s, "lsp: no definition found", 24);
+        return 0 - 1;
+    }
+    var dest_line = lsp_pos_extract_first_line(resp, blen);
+    var dest_char = lsp_pos_extract_first_character(resp, blen);
+    if (dest_line < 0) {
+        editor_set_status(s, "lsp: no position in response", 28);
+        return 0 - 1;
+    }
+    if (dest_char < 0) { dest_char = 0; }
+    if (lsp_streq(dest_uri, uri) == 1) {
+        var off = lsp_pos_lc_to_offset(content, clen, dest_line, dest_char);
+        editor_set_cursor(s, off);
+        return 0;
+    }
+    var msg = "lsp: definition in another file (cross-file jump deferred)";
+    editor_set_status(s, msg, strlen(msg));
+    return 0;
+}
+
+# === :lsp-find-refs ===
+
+fn _cyim_lsp_ex_find_refs(s) {
+    var path = editor_file_path(s);
+    if (path == 0) { return 0; }
+    if (lsp_path_is_cyr(path) == 0) { return 0; }
+    _cyim_lsp_post_change(s);
+    var b = editor_buf(s);
+    if (b == 0) { return 0; }
+    var clen_slot[8];
+    store64(&clen_slot, 0);
+    var content = _cyim_buf_to_flat(b, &clen_slot);
+    if (content == 0) { return 0 - 1; }
+    var clen = load64(&clen_slot);
+    var line_slot[8];
+    store64(&line_slot, 0);
+    var char_slot[8];
+    store64(&char_slot, 0);
+    lsp_pos_offset_to_lc(content, clen, editor_cursor(s), &line_slot, &char_slot);
+    var uri = lsp_path_to_uri(path);
+    if (uri == 0) { return 0 - 1; }
+    var blen_slot[8];
+    store64(&blen_slot, 0);
+    var resp = lsp_nav_request_sync(uri, load64(&line_slot), load64(&char_slot),
+                                    "textDocument/references", &blen_slot);
+    if (resp == 0) {
+        editor_set_status(s, "lsp: no response from server", 28);
+        return 0 - 1;
+    }
+    var blen = load64(&blen_slot);
+    # Count `"uri":` occurrences as a proxy for reference count.
+    var n = _lsp_diags_count_pattern(resp, blen, "\"uri\":");
+    var n_str = _lsp_doc_itoa(n);
+    if (n_str == 0) { return 0 - 1; }
+    var nl = strlen(n_str);
+    var prefix = "lsp: ";
+    var suffix = " references";
+    var pl = strlen(prefix);
+    var sl = strlen(suffix);
+    var msg = alloc(pl + nl + sl + 1);
+    if (msg == 0) { return 0 - 1; }
+    var off = 0;
+    var i = 0;
+    while (i < pl) { store8(msg + off + i, load8(prefix + i)); i = i + 1; }
+    off = off + pl;
+    i = 0;
+    while (i < nl) { store8(msg + off + i, load8(n_str + i)); i = i + 1; }
+    off = off + nl;
+    i = 0;
+    while (i < sl) { store8(msg + off + i, load8(suffix + i)); i = i + 1; }
+    off = off + sl;
+    store8(msg + off, 0);
+    editor_set_status(s, msg, off);
+    return 0;
+}
+
+# === Public entry — register all hooks ===
+#
+# Called from cyim's main() after plugin_init() (and any other
+# <plugin>_init() calls). Idempotent only in the "single source
+# of truth" sense — calling twice double-registers.
+
+fn cyim_lsp_init() {
+    plugin_register_post_save_hook(&_cyim_lsp_post_save);
+    plugin_register_post_change_hook(&_cyim_lsp_post_change);
+    plugin_register_status_segment(&_cyim_lsp_status_segment);
+    plugin_register_diagnostic_provider(&_cyim_lsp_diagnostic_provider);
+    plugin_register_ex_command("lsp-restart",   &_cyim_lsp_ex_restart);
+    plugin_register_ex_command("lsp-status",    &_cyim_lsp_ex_status);
+    plugin_register_ex_command("lsp-goto-def",  &_cyim_lsp_ex_goto_def);
+    plugin_register_ex_command("lsp-find-refs", &_cyim_lsp_ex_find_refs);
+    return 0;
+}

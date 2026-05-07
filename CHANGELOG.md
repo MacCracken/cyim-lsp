@@ -4,6 +4,125 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.2] — 2026-05-07
+
+**Bundle shape correction. Fixes the v1.0.0 misship where
+`cyim_lsp_init()` and the six hook callbacks were listed as
+frozen `[lib]` exports despite referencing consumer-side cyim
+symbols that don't resolve in any compilation unit not built
+atop cyim.**
+
+The v1.0.0 freeze was never validated against its declared
+consumer (cyim 1.4.0). The first attempt to fold cyim-lsp into
+cyim's TU failed — three of seven `[lib]` modules
+(`plugin_init.cyr`, `lsp_documents.cyr`, `lsp_position.cyr`)
+contained unresolved cyim-side references (`editor_*`, `buf_get`,
+`buf_len`, `plugin_register_*`, `DIAG_*`, `ACT_NONE`,
+`diag_new`). cyim-lsp's own tests papered over this with stubs;
+cyim's narrow tests can't.
+
+v1.0.2 makes the bundle **genuinely self-contained** — every
+symbol resolves against the bundle + cyrius stdlib, with zero
+references to consumer-side editor symbols. Verified via grep
+against the regenerated distfile.
+
+### Removed (moved to consumer-side reference glue)
+
+- `src/plugin_init.cyr` deleted from `[lib].modules` and from
+  the source tree. The 11 functions it contained
+  (`cyim_lsp_init`, `_cyim_lsp_post_save/post_change/status_segment/
+  diagnostic_provider/gd/gr`, four `_cyim_lsp_ex_*`) live in
+  `docs/examples/cyim_glue.cyr` as reference glue for
+  consumers to copy into their own tree.
+- `lsp_doc_did_change(s)`, `lsp_doc_did_save(s, path)`,
+  `lsp_nav_goto_def(s)`, `lsp_nav_find_refs(s)`, and
+  `_lsp_nav_request(s, ...)` removed from `lsp_documents.cyr`.
+  These touched cyim's `editor_*` ABI and could never have
+  resolved in a self-contained bundle. Replaced by pure-protocol
+  senders (see Added below); the editor-orchestrating versions
+  live in `docs/examples/cyim_glue.cyr`.
+
+### Changed (renamed — underscore-prefix dropped on cross-module helpers)
+
+- `_lsp_pos_offset_to_lc(b, off, line_out, char_out)` →
+  `lsp_pos_offset_to_lc(content, content_len, off, line_out, char_out)`.
+  Takes flat content pointer + length; consumer materializes
+  buffer first.
+- `_lsp_pos_lc_to_offset(b, line, character)` →
+  `lsp_pos_lc_to_offset(content, content_len, line, character)`.
+  Same parameterization.
+- `_lsp_pos_extract_uri/_first_line/_first_character` →
+  `lsp_pos_extract_uri/_first_line/_first_character` (rename only;
+  body bytescan was already pure).
+- `_lsp_path_to_uri(path)` → `lsp_path_to_uri(path)`.
+- `_lsp_path_is_cyr(path)` → `lsp_path_is_cyr(path)`.
+- `_lsp_buf_to_json_string(b)` → `lsp_content_to_json_string(content, content_len)`.
+- `_lsp_doc_lazy_start()` → `lsp_doc_lazy_start()`.
+
+### Added
+
+- `lsp_doc_send_did_open(entry, content, content_len)` —
+  pure-protocol didOpen sender. Bumps version + marks entry
+  opened on success.
+- `lsp_doc_send_did_change(entry, content, content_len)` —
+  pure-protocol didChange sender. Falls through to
+  `lsp_doc_send_did_open` if the entry hasn't been opened yet.
+- `lsp_doc_send_did_save(uri)` — pure-protocol didSave sender.
+- `lsp_nav_request_sync(uri, line, character, method, body_len_out)`
+  — pure-protocol synchronous request sender. Caller passes
+  pre-extracted position; consumer glue handles the cyim-side
+  cursor → position conversion via `lsp_pos_offset_to_lc`.
+- `lsp_streq(a, b)` — pure cstring equality (used by consumer
+  glue for same-file URI comparison).
+- `docs/examples/cyim_glue.cyr` — reference consumer-side glue
+  for cyim. Demonstrates buffer materialization, hook
+  registration, response handling.
+- `docs/examples/README.md` — explains the consumer-side
+  fold-in pattern and why glue is consumer-side, not bundled.
+
+### Manifest
+
+- `cyrius.cyml [lib].modules` now lists 7 modules (was 8 at
+  v1.0.1): jsonrpc, subprocess, lsp_diags, lsp_client,
+  lsp_state, lsp_position, lsp_documents.
+- Inline comment updated to reflect the self-contained bundle
+  invariant and pointer to `docs/examples/cyim_glue.cyr`.
+
+### Documentation
+
+- [`docs/adr/0001-api-freeze.md`](docs/adr/0001-api-freeze.md) —
+  v1.0.2 amendment section explaining what was wrong with v1.0.0,
+  what changed, and why this is a 1.0.2 (not 2.0.0). Includes
+  process consequence: future API freezes must include a fold-in
+  dry-run against a real consumer, not just internal tests.
+- `CLAUDE.md` — Plugin shape diagram corrected (7 real modules,
+  not the original 4-module placeholder); inlined volatile state
+  removed (cyim 1.3.6, "6 hook types") and replaced with pointer
+  to `state.md`.
+- `docs/development/state.md` — full refresh: line counts, real
+  module list, consumer status (cyim 1.4.0 fold-in unblocked),
+  test counts.
+
+### Tests
+
+- `tests/lsp_position.tcyr` — stubs for `buf_get`/`buf_len`/
+  `editor_*` removed; positions tested against flat byte arrays
+  directly. 38 assertions PASS (unchanged from v1.0.1).
+- `tests/lsp_documents.tcyr` — stubs removed; new coverage for
+  `lsp_content_to_json_string`, `_lsp_nav_build_params`,
+  `lsp_streq`. 48 assertions PASS (was 39 at v1.0.1).
+- `cyrius test` — 7 suites, **174 assertions all PASS** (was
+  171 at v1.0.1).
+- `cyrius fuzz` — 1 PASS · `cyrius lint` — 0 warnings across
+  all 9 src files.
+
+### Verified
+
+- `dist/cyim-lsp.cyr` (regenerated, 2163 lines) contains zero
+  references to consumer-side cyim symbols. Verified by grep
+  against the patterns `editor_*`, `buf_get`, `buf_len`,
+  `plugin_register_*`, `\bDIAG_`, `\bACT_NONE\b`, `diag_new`.
+
 ## [1.0.1] — 2026-05-06
 
 Audit-finding repairs from the v1.0.0 pre-freeze security pass

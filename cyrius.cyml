@@ -33,16 +33,25 @@ stdlib = [
 
 # `[lib]` drives `cyrius distlib` — concatenates the listed modules
 # into `dist/cyim-lsp.cyr` for downstream consumers (cyim, via
-# `include "lib/cyim-lsp.cyr"` in src/main.cyr per ADR 0003 §4).
+# `include "lib/cyim-lsp.cyr"`). The bundle is **self-contained**:
+# every symbol resolves against the listed modules + cyrius stdlib,
+# with NO references to consumer-side editor symbols. Consumer-side
+# hook registration lives in the consumer's own glue file (see
+# `docs/examples/cyim_glue.cyr` for cyim's reference shape).
+#
 # Single-pass compiler: each module may only reference symbols
 # defined earlier. Order:
-#   jsonrpc.cyr   — Content-Length framing, message build / parse
-#   lsp_client.cyr — LSP protocol (initialize, didSave, didChange,
-#                   publishDiagnostics handlers); references jsonrpc
-#   plugin_init.cyr — cyim_lsp_init() hook registration; references
-#                    cyim's plugin ABI (plugin_register_*, editor_*,
-#                    buf_*) which only resolves when bundled INTO
-#                    cyim's compilation unit.
+#   jsonrpc.cyr        — Content-Length framing, message build / parse
+#   subprocess.cyr     — pipe / fork / exec / dup2 primitives
+#   lsp_diags.cyr      — publishDiagnostics walker, per-URI tuple state
+#                        (defines lsp_diags_handle_frame)
+#   lsp_client.cyr     — LSP protocol (initialize, send, recv, drain);
+#                        references jsonrpc + subprocess + lsp_diags_handle_frame
+#   lsp_state.cyr      — per-buffer state vec
+#   lsp_position.cyr   — line↔char/offset helpers; URI/coord parse;
+#                        references lsp_diags (find/parse helpers)
+#   lsp_documents.cyr  — didOpen/didChange/didSave/nav senders;
+#                        references jsonrpc + lsp_client + lsp_state
 [lib]
 modules = [
     "src/jsonrpc.cyr",
@@ -52,5 +61,4 @@ modules = [
     "src/lsp_state.cyr",
     "src/lsp_position.cyr",
     "src/lsp_documents.cyr",
-    "src/plugin_init.cyr",
 ]

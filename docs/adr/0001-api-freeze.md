@@ -1,7 +1,22 @@
 # 0001 — Public API freeze at v1.0.0
 
-**Status**: Accepted
-**Date**: 2026-05-06
+**Status**: Accepted (with v1.0.2 amendment — see end)
+**Date**: 2026-05-06 (amended 2026-05-07)
+
+> **2026-05-07 amendment**: the v1.0.0 freeze listed
+> `cyim_lsp_init()` and the six hook callbacks as frozen bundle
+> exports. They were never viable bundle exports — they reference
+> consumer-side editor symbols that don't resolve in any
+> compilation unit not built atop cyim. The 1.0.2 amendment
+> moves them out of the frozen surface entirely (they live in
+> `docs/examples/cyim_glue.cyr` as reference glue, copied
+> verbatim into the consumer's own tree). The bundle is now
+> genuinely self-contained — every symbol resolves against
+> the bundle + cyrius stdlib. Position helpers are also
+> reparameterized to take flat `(content_ptr, content_len)`
+> instead of an opaque `b` handle. **Skip to the
+> [v1.0.2 amendment](#v102-amendment-2026-05-07)** for the
+> as-shipped frozen surface.
 
 ## Context
 
@@ -295,3 +310,123 @@ author confidence matters. "Will my v1.0.0 plugin still
 compile against cyim-lsp 1.2?" deserves a documented answer,
 not "probably; ask MacCracken." The ADR is the documented
 answer.
+
+## v1.0.2 amendment (2026-05-07)
+
+### What was wrong with v1.0.0
+
+The original frozen surface listed `cyim_lsp_init()` and six
+hook callbacks (`_cyim_lsp_post_save`, `_cyim_lsp_post_change`,
+`_cyim_lsp_status_segment`, `_cyim_lsp_diagnostic_provider`,
+`_cyim_lsp_gd`, `_cyim_lsp_gr`, plus the four `_cyim_lsp_ex_*`
+ex-command callbacks) as part of `[lib].modules` —
+`src/plugin_init.cyr` was bundled into `dist/cyim-lsp.cyr`.
+
+Those symbols reference cyim-side ABI (`plugin_register_*`,
+`editor_*`, `buf_*`, `diag_new`, `DIAG_*`, `ACT_NONE`) that
+**only resolves inside cyim's own translation unit**. The same
+problem extended to `lsp_documents.cyr` (which called
+`editor_buf`, `editor_file_path`, `editor_cursor`,
+`editor_set_status`, `editor_set_cursor`, `buf_get`, `buf_len`)
+and `lsp_position.cyr` (which called `buf_get`, `buf_len`).
+
+Three of seven [lib] modules contained unresolved cyim-side
+references, which broke any cyim test target that built without
+the full plugin chain in scope. cyim-lsp's *own* tests papered
+over this with stub function definitions (`fn buf_get(b, i)
+{ return 0; }` etc.) — but cyim's narrow tests like
+`tests/buffer.tcyr` could not stub all of cyim's plugin surface,
+so the v1.0.0 fold-in was structurally impossible.
+
+The v1.0.0 freeze was never validated against its only declared
+consumer (cyim 1.4.0). The first attempt to fold cyim-lsp 1.0.0
+into cyim's compilation unit failed — and rather than fix
+forward, the work was reverted.
+
+### What v1.0.2 changes
+
+The bundle is now **genuinely self-contained**: every symbol in
+`dist/cyim-lsp.cyr` resolves against the bundle's own modules +
+cyrius stdlib, with **zero references** to consumer-side editor
+symbols. Verified via `grep` against the regenerated distfile
+(zero matches for `editor_*`, `buf_get`, `buf_len`,
+`plugin_register_*`, `DIAG_*`, `ACT_NONE`, `diag_new`).
+
+**Removed from frozen surface** (these were never viable
+bundle exports — moved to consumer-side glue):
+
+| Symbol | Was at | Now at |
+|---|---|---|
+| `cyim_lsp_init()` | `src/plugin_init.cyr` | `docs/examples/cyim_glue.cyr` |
+| `_cyim_lsp_post_save` | `src/plugin_init.cyr` | `docs/examples/cyim_glue.cyr` |
+| `_cyim_lsp_post_change` | `src/plugin_init.cyr` | `docs/examples/cyim_glue.cyr` |
+| `_cyim_lsp_status_segment` | `src/plugin_init.cyr` | `docs/examples/cyim_glue.cyr` |
+| `_cyim_lsp_diagnostic_provider` | `src/plugin_init.cyr` | `docs/examples/cyim_glue.cyr` |
+| `_cyim_lsp_gd` / `_cyim_lsp_gr` | `src/plugin_init.cyr` | `docs/examples/cyim_glue.cyr` |
+| `_cyim_lsp_ex_*` (4) | `src/plugin_init.cyr` | `docs/examples/cyim_glue.cyr` |
+| `lsp_doc_did_change(s)` | `src/lsp_documents.cyr` | `docs/examples/cyim_glue.cyr` |
+| `lsp_doc_did_save(s, path)` | `src/lsp_documents.cyr` | `docs/examples/cyim_glue.cyr` |
+| `lsp_nav_goto_def(s)` | `src/lsp_documents.cyr` | `docs/examples/cyim_glue.cyr` |
+| `lsp_nav_find_refs(s)` | `src/lsp_documents.cyr` | `docs/examples/cyim_glue.cyr` |
+| `_lsp_nav_request(s, ...)` | `src/lsp_documents.cyr` | `docs/examples/cyim_glue.cyr` |
+
+**Renamed (underscore-prefix dropped — promoted to public API
+since they cross module boundaries and have no internal-only
+semantics):**
+
+| v1.0.0–v1.0.1 | v1.0.2+ |
+|---|---|
+| `_lsp_pos_offset_to_lc(b, off, line_out, char_out)` | `lsp_pos_offset_to_lc(content, content_len, off, line_out, char_out)` |
+| `_lsp_pos_lc_to_offset(b, line, character)` | `lsp_pos_lc_to_offset(content, content_len, line, character)` |
+| `_lsp_pos_extract_uri(body, blen)` | `lsp_pos_extract_uri(body, blen)` |
+| `_lsp_pos_extract_first_line(body, blen)` | `lsp_pos_extract_first_line(body, blen)` |
+| `_lsp_pos_extract_first_character(body, blen)` | `lsp_pos_extract_first_character(body, blen)` |
+| `_lsp_path_to_uri(path)` | `lsp_path_to_uri(path)` |
+| `_lsp_path_is_cyr(path)` | `lsp_path_is_cyr(path)` |
+| `_lsp_buf_to_json_string(b)` | `lsp_content_to_json_string(content, content_len)` |
+| `_lsp_doc_lazy_start()` | `lsp_doc_lazy_start()` |
+
+**New (added to frozen surface in v1.0.2 — pure-protocol
+senders that take pre-extracted state):**
+
+```cyrius
+lsp_doc_send_did_open(entry, content, content_len)   -> 0/-1
+lsp_doc_send_did_change(entry, content, content_len) -> 0/-1
+lsp_doc_send_did_save(uri)                           -> 0/-1
+lsp_nav_request_sync(uri, line, character, method, body_len_out) -> body_ptr/0
+lsp_streq(a, b)                                      -> 0/1
+```
+
+### Why this is a 1.0.2 (not 2.0.0)
+
+A frozen symbol that **cannot ever resolve** in a downstream
+translation unit was never a real export. Removing
+`cyim_lsp_init()` from `[lib]` is fixing the original misship,
+not breaking a valid contract.
+
+The pure-protocol surface (jsonrpc, subprocess, lsp_client,
+lsp_state, lsp_diags, plus all `_lsp_*` helpers in
+lsp_position and lsp_documents that don't reference cyim
+symbols) WAS self-contained from day one. That subset is
+preserved — the underscore-prefix rename and the parameter swap
+on the position helpers are mechanically equivalent (single
+call site fixup in consumer glue), and the additions are
+strictly additive.
+
+The "freeze covers what was actually self-contained from day
+one" framing makes 1.0.2 honest. Calling this 2.0.0 would be
+honoring a freeze that was a lie.
+
+### Process consequence
+
+Before any future API freeze, the closeout pass must include
+**a fold-in dry-run against a real consumer** — not just
+internal test compilation. The v0.7.0 closeout pass (audit +
+dead-code + security re-scan) didn't catch this because the
+bundle's own tests use stubs to satisfy compilation. A real
+consumer can't stub.
+
+The new closeout requirement: build cyim with
+`include "lib/cyim-lsp.cyr"` and run cyim's own narrow test
+targets. If they don't compile, the bundle isn't ready to
+freeze.
