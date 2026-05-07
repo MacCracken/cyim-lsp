@@ -32,7 +32,10 @@
 #   plugin_register_status_segment(fp)            fp(s)       -> cstring
 #   plugin_register_diagnostic_provider(fp)       fp(s, b, out_vec) -> 0
 #   plugin_register_normal_key(key, fp)           fp(s)       -> action
+#   plugin_register_normal_prefix_key(prefix, key, fp)        # cyim 1.4.2
 #   plugin_register_ex_command(name, fp)          fp(s)       -> 0/-1
+#   plugin_buf_load_file(s, path) -> buf or 0                 # cyim 1.4.2
+#   KEY_G                                                     # cyim 1.4.2
 #   editor_buf(s) / editor_file_path(s)           accessors (load64)
 #   editor_set_status(s, msg)                     2-arg cstring set
 #   buf_get(b, i) / buf_len(b)                    buffer-byte access
@@ -45,6 +48,10 @@
 # — cursor is per-buffer, not per-editor (cyim has multi-buffer
 # state). Read via `buf_cursor(editor_buf(s))`; write via
 # `buf_move(editor_buf(s), off)`.
+#
+# Minimum cyim version: 1.4.2 (for `plugin_register_normal_prefix_key`
+# and `plugin_buf_load_file`). cyim-lsp 1.0.x bundle ABI is unchanged
+# at 1.1.0 — only this consumer-side glue grew.
 
 # === Buffer materialization ===
 #
@@ -181,10 +188,30 @@ fn _cyim_lsp_diagnostic_provider(s, b, out_vec) {
     return 0;
 }
 
-# === Stubs for normal_key gd / gr (reserved) ===
+# === Normal-mode prefix-key handlers (gd / gr) ===
+#
+# v1.1.0 — activated against cyim 1.4.2's
+# `plugin_register_normal_prefix_key` ABI. The handlers delegate
+# to the ex-command implementations so `gd` and `:lsp-goto-def`
+# share one code path. Both return ACT_NONE — the prefix-dispatch
+# pipeline expects an action_id and side effects (cursor jump /
+# status set) happen during the delegate call.
+#
+# Built-ins win on conflict per cyim ADR 0003 §3, so the cyim
+# 1.4.2 built-in `gg` (ACT_MOVE_FILE_START) shadows any plugin
+# attempt to bind `(KEY_G, 'g', fp)`. `(KEY_G, 'd')` and
+# `(KEY_G, 'r')` are unclaimed by built-ins, so the plugin owns
+# them.
 
-fn _cyim_lsp_gd(s) { return ACT_NONE; }
-fn _cyim_lsp_gr(s) { return ACT_NONE; }
+fn _cyim_lsp_gd(s) {
+    _cyim_lsp_ex_goto_def(s);
+    return ACT_NONE;
+}
+
+fn _cyim_lsp_gr(s) {
+    _cyim_lsp_ex_find_refs(s);
+    return ACT_NONE;
+}
 
 # === ex-command hooks ===
 
@@ -272,11 +299,29 @@ fn _cyim_lsp_ex_goto_def(s) {
     }
     if (dest_char < 0) { dest_char = 0; }
     if (lsp_streq(dest_uri, uri) == 1) {
+        # Same-file: jump cursor in current buffer.
         var off = lsp_pos_lc_to_offset(content, clen, dest_line, dest_char);
         buf_move(b, off);
         return 0;
     }
-    editor_set_status(s, "lsp: definition in another file (cross-file jump deferred)");
+    # Cross-file: load destination via cyim 1.4.2's plugin_buf_load_file.
+    # dest_uri starts with "file://" per LSP §3.5; strip 7 bytes to get
+    # the absolute path. (URL-encoded paths e.g. file:///foo%20bar are
+    # not decoded — those would need a percent-decode pass; deferred.)
+    var dest_path = dest_uri + 7;
+    var new_b = plugin_buf_load_file(s, dest_path);
+    if (new_b == 0) {
+        editor_set_status(s, "lsp: failed to load definition file");
+        return 0 - 1;
+    }
+    # Materialize the loaded buffer's content for offset conversion.
+    var nb_clen_slot[8];
+    store64(&nb_clen_slot, 0);
+    var nb_content = _cyim_lsp_buf_to_flat(new_b, &nb_clen_slot);
+    if (nb_content == 0) { return 0 - 1; }
+    var nb_off = lsp_pos_lc_to_offset(nb_content, load64(&nb_clen_slot),
+                                       dest_line, dest_char);
+    buf_move(new_b, nb_off);
     return 0;
 }
 
@@ -343,6 +388,9 @@ fn cyim_lsp_init() {
     plugin_register_post_change_hook(&_cyim_lsp_post_change);
     plugin_register_status_segment(&_cyim_lsp_status_segment);
     plugin_register_diagnostic_provider(&_cyim_lsp_diagnostic_provider);
+    # v1.1.0 — gd / gr prefix-keymap (cyim 1.4.2 ABI).
+    plugin_register_normal_prefix_key(KEY_G, 100, &_cyim_lsp_gd);   # 'd' = 100
+    plugin_register_normal_prefix_key(KEY_G, 114, &_cyim_lsp_gr);   # 'r' = 114
     plugin_register_ex_command("lsp-restart",   &_cyim_lsp_ex_restart);
     plugin_register_ex_command("lsp-status",    &_cyim_lsp_ex_status);
     plugin_register_ex_command("lsp-goto-def",  &_cyim_lsp_ex_goto_def);

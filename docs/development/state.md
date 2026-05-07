@@ -5,6 +5,15 @@
 
 ## Version
 
+**1.1.0** — Reference glue activates cyim 1.4.2 ABIs shipped
+2026-05-07. `[lib]` bundle source unchanged; dist regenerated
+with new banner. `docs/examples/cyim_glue.cyr` now consumes
+`plugin_register_normal_prefix_key` (binds `gd` / `gr`) and
+`plugin_buf_load_file` (cross-file goto-def). cyim 1.4.3+ picks
+this up; cyim 1.4.2 is the minimum host version. URL-encoded
+paths in URIs and the find-refs quickfix list remain deferred
+(quickfix awaits cyim 1.5.0's `plugin_list_display`).
+
 **1.0.3** — Subprocess env passthrough shipped 2026-05-07.
 `_lsp_proc_exec` now populates `envp` from `/proc/self/environ`
 so children inherit cyim's full environment. Fixes the broken
@@ -159,7 +168,8 @@ Direct (declared in `cyrius.cyml`):
 
 | Consumer | Status |
 |---|---|
-| cyim 1.4.0 | **unblocked** — v1.0.2 bundle is genuinely fold-in-ready; cyim provides its own glue at `src/plugins/lsp_glue.cyr` (or equivalent) by copying `docs/examples/cyim_glue.cyr` |
+| cyim 1.4.3+ | **active** — picks up cyim-lsp 1.1.0 reference glue with gd/gr keymap dispatch + cross-file goto-def via cyim 1.4.2's `plugin_register_normal_prefix_key` and `plugin_buf_load_file` ABIs |
+| cyim 1.4.0–1.4.1 | shipped against cyim-lsp 1.0.2/1.0.3 reference glue (gd/gr stubs; cross-file deferred); upgrade path: bump `[deps.cyim-lsp].tag` and copy the updated `docs/examples/cyim_glue.cyr` |
 | cyim 1.3.x | not applicable (no plugin pickup) |
 
 ## Next

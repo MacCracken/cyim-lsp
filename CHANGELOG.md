@@ -4,6 +4,88 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-05-07
+
+**Reference consumer-side glue activates cyim 1.4.2 ABIs.**
+
+The cyim-lsp `[lib]` bundle source is **unchanged at 1.1.0** —
+no protocol code, parser, or state-management updates. The
+distfile is byte-different (regenerated banner says `Version: 1.1.0`)
+but functionally identical to 1.0.3.
+
+What changed: `docs/examples/cyim_glue.cyr` (the reference
+consumer-side glue) now consumes cyim 1.4.2's two new ABI
+surfaces — `plugin_register_normal_prefix_key` (gd / gr keymap
+dispatch) and `plugin_buf_load_file` (cross-file goto-def). The
+1.1.0 minor bump signals "consumers copying this glue get
+gd/gr/cross-file activations against cyim 1.4.2+; consumers
+copying cyim-lsp 1.0.x glue do not."
+
+Minimum cyim version for the 1.1.0 reference glue: **cyim 1.4.2**.
+
+### Changed — `docs/examples/cyim_glue.cyr`
+
+- `_cyim_lsp_gd(s)` and `_cyim_lsp_gr(s)` — were ACT_NONE stubs
+  at 1.0.x. Now delegate to `_cyim_lsp_ex_goto_def` and
+  `_cyim_lsp_ex_find_refs` respectively, then return ACT_NONE
+  (the prefix-dispatch pipeline expects an action_id; cursor
+  jumps and status-bar updates happen as side effects of the
+  delegate calls).
+- `_cyim_lsp_ex_goto_def(s)` — the cross-file branch was
+  `editor_set_status(s, "lsp: definition in another file
+  (cross-file jump deferred)"); return 0;`. Now strips
+  `file://` prefix from the destination URI, calls
+  `plugin_buf_load_file(s, dest_path)`, materializes the
+  loaded buffer's content via `_cyim_lsp_buf_to_flat`, converts
+  `(line, character)` to a byte offset via
+  `lsp_pos_lc_to_offset`, and `buf_move`s the new buffer's
+  cursor. Same-file branch unchanged.
+- `cyim_lsp_init()` — registers `(KEY_G, 'd', _cyim_lsp_gd)`
+  and `(KEY_G, 'r', _cyim_lsp_gr)` via cyim 1.4.2's
+  `plugin_register_normal_prefix_key`. cyim's built-in `gg`
+  (`ACT_MOVE_FILE_START`) wins on conflict per ADR 0003 §3, so
+  no collision risk.
+
+### Limitations (deferred)
+
+- **URL-encoded paths in `file://` URIs** (e.g. `file:///foo%20bar`)
+  are not percent-decoded — the dest-path is a direct slice of
+  the URI starting at byte 7. Files with spaces / non-ASCII in
+  paths won't load correctly. Deferred to a future patch when
+  the corner case surfaces.
+- **`:lsp-find-refs` quickfix list** still surfaces only a
+  count in the status bar. The popup-overlay ABI
+  (`plugin_list_display`) lands in cyim 1.5.0; cyim-lsp 1.1.x
+  or 1.2.0 will activate the quickfix UI.
+
+### Added — none in `[lib]`
+
+The bundle source is unchanged. `cyrius distlib` regenerated
+the banner-versioned distfile (2228 lines, identical content
+modulo the 4-line banner header).
+
+### Tests
+
+- `cyrius test` — 174 assertions all PASS (unchanged from 1.0.3 —
+  the [lib] code didn't move).
+- `cyrius fuzz` — 1 PASS.
+- `cyrius lint` — 0 warnings.
+
+### Verification path (cyim 1.4.3+)
+
+When cyim 1.4.3 picks up this version via
+`[deps.cyim-lsp].tag = "1.1.0"`, copies the updated reference
+glue into `src/plugins/lsp_glue.cyr`, and the user opens a `.cyr`
+file with cyrius-lsp on PATH:
+
+- `gd` over a symbol jumps to its definition (same-file: cursor
+  moves; cross-file: file loads + cursor jumps).
+- `gr` shows reference count in status segment (quickfix list
+  awaits cyim 1.5.0).
+- `:lsp-goto-def` / `:lsp-find-refs` continue to work as in
+  1.0.x — the prefix-keys are an additional surface, not a
+  replacement.
+
 ## [1.0.3] — 2026-05-07
 
 **Subprocess env passthrough — fixes broken `lsp_client_start_default()`.**
