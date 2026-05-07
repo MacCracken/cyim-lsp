@@ -4,6 +4,99 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-05-07
+
+**`:lsp-find-refs` / `gr` becomes a navigable quickfix picker.**
+
+Closes the last deferred LSP UI gap. With cyim 1.5.0 shipping
+`plugin_list_display`, the reference-count status-bar fallback
+(in cyim-lsp 1.0.x and 1.1.x) is replaced by a real popup picker.
+Pressing `gr` over a Cyrius symbol now: sends
+`textDocument/references`, walks the response, builds
+`filename:line:col` labels, and displays a bottom-anchored
+quickfix list. j/k navigates, Enter loads + jumps the cursor to
+the selected reference, Esc/q dismisses.
+
+The cyim-lsp `[lib]` bundle source is **unchanged at 1.2.0** —
+no protocol code, parser, or state-management updates. The dist
+regenerates with a 1.2.0 banner. As with 1.1.0, the version bump
+signals "consumers copying this glue get the quickfix activation
+against cyim 1.5.0+; consumers copying earlier glue do not."
+
+Minimum cyim version for the 1.2.0 reference glue: **cyim 1.5.0**.
+
+### Changed — `docs/examples/cyim_glue.cyr`
+
+- `_cyim_lsp_ex_find_refs(s)` — was the v1.1.0 status-bar count
+  ("lsp: N references"). Now:
+  1. Sends `textDocument/references` (unchanged).
+  2. Walks the response array via `_cyim_lsp_parse_refs` (new),
+     populating three parallel module-level vecs:
+     `_cyim_lsp_refs_uris` (cstring), `_cyim_lsp_refs_lines` (i64),
+     `_cyim_lsp_refs_chars` (i64).
+  3. Builds a labels vec via `_cyim_lsp_label_for_ref` (new) —
+     `filename:line:col` cstrings (1-indexed for display, last
+     path segment of the URI).
+  4. Calls `plugin_list_display(s, labels, count, &_cyim_lsp_on_ref_select)`.
+  5. On Enter, the on_select callback looks up the (uri, line,
+     char) at `idx`, calls `plugin_buf_load_file` (dedups against
+     active buflist), materializes content, converts (line, char)
+     → byte offset, and `buf_move`s the cursor.
+- `n == 0` empty-result case still surfaces a status message
+  (`"lsp: no references found"`) instead of an empty popup.
+
+### Added — example helpers (no `[lib]` change)
+
+- `_cyim_lsp_parse_refs(body, blen, uris, lines, chars)` — walks
+  the response array using the bundle's `_lsp_diags_find` /
+  `_lsp_diag_parse_int` byte-scan helpers (linked into the
+  consumer's TU when the bundle is folded in). Returns the count.
+- `_cyim_lsp_label_for_ref(uri, line, char)` — formats
+  `filename:line:col` (1-indexed display).
+- `_cyim_lsp_on_ref_select(s, idx)` — `plugin_list_display`
+  callback that loads + jumps to the selected reference.
+- Module-level globals `_cyim_lsp_refs_uris`, `_cyim_lsp_refs_lines`,
+  `_cyim_lsp_refs_chars` — parallel payload vecs the on_select
+  callback indexes by `idx`. Single active picker at a time
+  (matches `plugin_list_display`'s single-list constraint); a
+  second `:lsp-find-refs` call replaces them cleanly.
+
+### Limitations (still deferred)
+
+- **URL-encoded `file://` URIs** — same as 1.1.0. The dest-path
+  is a direct byte-7 slice of the URI; files with spaces /
+  non-ASCII in paths won't load. Future percent-decode pass.
+- **Reference previews** — labels show `filename:line:col` only;
+  no source-line preview. cyim's `plugin_list_display` doesn't
+  expose a preview pane (would be cyim 1.6+ work). Could be
+  added by appending a preview snippet to each label cstring,
+  but truncation rules + line fetch from disk are non-trivial.
+- **Cross-window navigation** — selecting a ref switches the
+  active buffer's window. cyim-side multi-window navigation
+  (e.g. open in split) is a future cyim ABI extension.
+
+### Tests
+
+- `cyrius test` — 174 assertions all PASS (unchanged from 1.0.3 /
+  1.1.0; `[lib]` source unchanged across the 1.0–1.2 series).
+- `cyrius fuzz` — 1 PASS.
+- `cyrius lint` — 0 warnings.
+- `dist/cyim-lsp.cyr` regenerated, 2228 lines (banner-only delta
+  vs. 1.1.0).
+
+### Verification path (cyim 1.5.1+ pickup)
+
+When cyim picks up this version via `[deps.cyim-lsp].tag = "1.2.0"`
+and copies the updated reference glue, opening a `.cyr` file with
+`cyrius-lsp` on PATH:
+
+- `gr` over a symbol → `:lsp-find-refs` quickfix picker pops up
+  at the bottom of the screen. j/k navigates, Enter jumps to the
+  selected reference, Esc/q dismisses.
+- `gd` (cross-file goto-def) continues to work as in 1.1.0 — the
+  picker is a separate code path.
+- `:lsp-restart` / `:lsp-status` continue to work unchanged.
+
 ## [1.1.0] — 2026-05-07
 
 **Reference consumer-side glue activates cyim 1.4.2 ABIs.**

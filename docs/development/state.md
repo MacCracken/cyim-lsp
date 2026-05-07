@@ -5,6 +5,19 @@
 
 ## Version
 
+**1.2.0** — `:lsp-find-refs` / `gr` becomes a navigable quickfix
+picker shipped 2026-05-07. `[lib]` bundle source unchanged across
+1.0–1.2 series; dist regenerated with 1.2.0 banner.
+`docs/examples/cyim_glue.cyr` now consumes cyim 1.5.0's
+`plugin_list_display` ABI: rewritten `_cyim_lsp_ex_find_refs`
+parses the response into parallel `(uri, line, char)` vecs,
+builds `filename:line:col` labels, and displays the picker.
+on_select loads the file via `plugin_buf_load_file` and
+`buf_move`s to the destination. Empty-result case still surfaces
+a status message. Minimum cyim version: **1.5.0**. URL-encoded
+URIs + reference previews + open-in-split remain deferred (cyim
+1.6+ work).
+
 **1.1.0** — Reference glue activates cyim 1.4.2 ABIs shipped
 2026-05-07. `[lib]` bundle source unchanged; dist regenerated
 with new banner. `docs/examples/cyim_glue.cyr` now consumes
@@ -168,8 +181,9 @@ Direct (declared in `cyrius.cyml`):
 
 | Consumer | Status |
 |---|---|
-| cyim 1.4.3+ | **active** — picks up cyim-lsp 1.1.0 reference glue with gd/gr keymap dispatch + cross-file goto-def via cyim 1.4.2's `plugin_register_normal_prefix_key` and `plugin_buf_load_file` ABIs |
-| cyim 1.4.0–1.4.1 | shipped against cyim-lsp 1.0.2/1.0.3 reference glue (gd/gr stubs; cross-file deferred); upgrade path: bump `[deps.cyim-lsp].tag` and copy the updated `docs/examples/cyim_glue.cyr` |
+| cyim 1.5.1+ | **planned pickup** — the cyim-lsp 1.2.0 reference glue activates `:lsp-find-refs` / `gr` as a navigable quickfix picker via cyim 1.5.0's `plugin_list_display` ABI. Cyim 1.5.0 was just shipped; the consumer-side bump (`[deps.cyim-lsp].tag = "1.2.0"`) plus copying the updated `docs/examples/cyim_glue.cyr` lands as cyim 1.5.1. |
+| cyim 1.4.3 / 1.5.0 | shipped against cyim-lsp 1.1.0 reference glue (gd/gr keymap + cross-file goto-def; refs surface only count in status bar); upgrade path: bump `[deps.cyim-lsp].tag` to 1.2.0 + copy updated glue |
+| cyim 1.4.0–1.4.2 | shipped against cyim-lsp 1.0.2/1.0.3 reference glue (gd/gr stubs; cross-file deferred); two-step upgrade path |
 | cyim 1.3.x | not applicable (no plugin pickup) |
 
 ## Next

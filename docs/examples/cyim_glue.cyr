@@ -35,6 +35,7 @@
 #   plugin_register_normal_prefix_key(prefix, key, fp)        # cyim 1.4.2
 #   plugin_register_ex_command(name, fp)          fp(s)       -> 0/-1
 #   plugin_buf_load_file(s, path) -> buf or 0                 # cyim 1.4.2
+#   plugin_list_display(s, items, count, on_select) -> 0      # cyim 1.5.0
 #   KEY_G                                                     # cyim 1.4.2
 #   editor_buf(s) / editor_file_path(s)           accessors (load64)
 #   editor_set_status(s, msg)                     2-arg cstring set
@@ -49,9 +50,11 @@
 # state). Read via `buf_cursor(editor_buf(s))`; write via
 # `buf_move(editor_buf(s), off)`.
 #
-# Minimum cyim version: 1.4.2 (for `plugin_register_normal_prefix_key`
-# and `plugin_buf_load_file`). cyim-lsp 1.0.x bundle ABI is unchanged
-# at 1.1.0 — only this consumer-side glue grew.
+# Minimum cyim version: 1.5.0 as of cyim-lsp 1.2.0 (for
+# `plugin_list_display`). 1.0.x consumers continue to work against
+# cyim 1.4.0+ if they stick with cyim-lsp 1.0.x glue. The bundle's
+# pure-protocol ABI is unchanged across 1.0.x → 1.1.x → 1.2.x; only
+# this consumer-side glue grew.
 
 # === Buffer materialization ===
 #
@@ -325,9 +328,199 @@ fn _cyim_lsp_ex_goto_def(s) {
     return 0;
 }
 
-# === :lsp-find-refs ===
+# === :lsp-find-refs — quickfix picker (v1.2.0) ===
+#
+# Cyim 1.5.0's plugin_list_display ABI lets us replace the
+# v1.0.x/1.1.x status-bar count with a navigable picker. Steps:
+#
+#   1. Send textDocument/references (same as before).
+#   2. Walk the response array, pulling (uri, line, character)
+#      for each location.
+#   3. Build a parallel labels vec of "filename:line:col" cstrings.
+#   4. Stash the (uri, line, char) parallel vecs in module-level
+#      globals so the on_select callback can look them up by index.
+#   5. plugin_list_display(s, labels, count, &_cyim_lsp_on_ref_select).
+#
+# The user picks one (j/k navigate, Enter select). on_select loads
+# the file (cyim 1.4.2's plugin_buf_load_file dedups against the
+# active buflist), materializes content, converts (line, char) →
+# byte offset, and buf_move's the cursor.
+#
+# Storage is module-global. Only one find-refs picker active at a
+# time (matches plugin_list_display's single-list constraint). A
+# second :lsp-find-refs call replaces the parallel vecs cleanly —
+# the old picker dismisses (cyim 1.5.0 semantics) before the new
+# one displays, so the old payload is never needed again.
 
-var _cyim_lsp_refs_msg[40];
+# Parallel payload vecs for the active picker. on_select indexes
+# all three by the same idx.
+var _cyim_lsp_refs_uris  = 0;   # vec<cstring>
+var _cyim_lsp_refs_lines = 0;   # vec<i64> — LSP 0-indexed
+var _cyim_lsp_refs_chars = 0;   # vec<i64> — LSP 0-indexed
+
+# Walk a textDocument/references response body, populating the
+# three parallel vecs. Returns the number of references parsed.
+#
+# Response shape (LSP §3.10.8):
+#   {"jsonrpc":"2.0","id":N,"result":[
+#     {"uri":"...","range":{"start":{"line":L,"character":C},"end":{...}}},
+#     ...
+#   ]}
+#
+# Strategy: bytescan for `"uri":"..."` then advance to the next
+# `"start":{"line":N,"character":M`. Reuses the bundle's internal
+# `_lsp_diags_find` / `_lsp_diag_parse_int` helpers (underscore
+# prefix is documentation, not access control — these are linked
+# into the consumer's TU when the bundle is folded in).
+fn _cyim_lsp_parse_refs(body, blen, uris, lines, chars) {
+    if (body == 0) { return 0; }
+    var count = 0;
+    var pos = 0;
+    var go = 1;
+    while (go == 1) {
+        var uri_p = _lsp_diags_find(body, blen, pos, "\"uri\":\"");
+        if (uri_p < 0) {
+            go = 0;
+        }
+        if (go == 1) {
+            var uri_start = uri_p + 7;
+            # Walk to the closing quote.
+            var uri_end = uri_start;
+            var quote_found = 0;
+            while (quote_found == 0) {
+                if (uri_end >= blen) {
+                    quote_found = 1;
+                    go = 0;
+                }
+                if (go == 1) {
+                    if (load8(body + uri_end) == 34) {
+                        quote_found = 1;
+                    }
+                    if (quote_found == 0) { uri_end = uri_end + 1; }
+                }
+            }
+            if (go == 1) {
+                # Materialize uri as heap cstring.
+                var ulen = uri_end - uri_start;
+                var uri = alloc(ulen + 1);
+                if (uri == 0) {
+                    go = 0;
+                }
+                if (go == 1) {
+                    var ci = 0;
+                    while (ci < ulen) {
+                        store8(uri + ci, load8(body + uri_start + ci));
+                        ci = ci + 1;
+                    }
+                    store8(uri + ulen, 0);
+
+                    # Find the next "start":{"line":N,"character":M block.
+                    var start_p = _lsp_diags_find(body, blen, uri_end, "\"start\":{");
+                    if (start_p < 0) { go = 0; }
+                    if (go == 1) {
+                        var line_p = _lsp_diags_find(body, blen, start_p, "\"line\":");
+                        if (line_p < 0) { go = 0; }
+                        if (go == 1) {
+                            var line_np_slot[8];
+                            store64(&line_np_slot, 0);
+                            var line_val = _lsp_diag_parse_int(body, blen,
+                                                                line_p + 7, &line_np_slot);
+                            var char_p = _lsp_diags_find(body, blen, line_p, "\"character\":");
+                            if (char_p < 0) { go = 0; }
+                            if (go == 1) {
+                                var char_np_slot[8];
+                                store64(&char_np_slot, 0);
+                                var char_val = _lsp_diag_parse_int(body, blen,
+                                                                    char_p + 12, &char_np_slot);
+                                vec_push(uris,  uri);
+                                vec_push(lines, line_val);
+                                vec_push(chars, char_val);
+                                count = count + 1;
+                                # Advance past this reference's "character" field.
+                                pos = char_p + 12;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return count;
+}
+
+# Format a "filename:line:col" cstring for one reference. Strips
+# the `file://` prefix from `uri`, takes the last path segment
+# (everything after the last '/'), and 1-indexes (line, char) for
+# display since most editors / LSP UIs surface 1-indexed
+# coordinates to humans even though LSP wire format is 0-indexed.
+fn _cyim_lsp_label_for_ref(uri, line, char) {
+    if (uri == 0) { return 0; }
+    var ul = strlen(uri);
+    # Find the last '/' to strip path → filename.
+    var last_slash = 0 - 1;
+    var i = 0;
+    while (i < ul) {
+        if (load8(uri + i) == 47) { last_slash = i; }
+        i = i + 1;
+    }
+    var name_start = last_slash + 1;
+    var name_len = ul - name_start;
+    var line_str = _lsp_doc_itoa(line + 1);
+    var char_str = _lsp_doc_itoa(char + 1);
+    if (line_str == 0) { return 0; }
+    if (char_str == 0) { return 0; }
+    var ll = strlen(line_str);
+    var cl = strlen(char_str);
+    # name + ':' + line + ':' + char + NUL.
+    var total = name_len + 1 + ll + 1 + cl + 1;
+    var out = alloc(total);
+    if (out == 0) { return 0; }
+    var off = 0;
+    var j = 0;
+    while (j < name_len) {
+        store8(out + off + j, load8(uri + name_start + j));
+        j = j + 1;
+    }
+    off = off + name_len;
+    store8(out + off, 58); off = off + 1;            # ':'
+    j = 0;
+    while (j < ll) { store8(out + off + j, load8(line_str + j)); j = j + 1; }
+    off = off + ll;
+    store8(out + off, 58); off = off + 1;            # ':'
+    j = 0;
+    while (j < cl) { store8(out + off + j, load8(char_str + j)); j = j + 1; }
+    off = off + cl;
+    store8(out + off, 0);
+    return out;
+}
+
+# plugin_list_display on_select callback. Looks up the (uri, line,
+# char) at `idx`, opens the file via plugin_buf_load_file (dedups
+# against active buflist if already open), materializes content,
+# converts (line, char) → byte offset, jumps cursor.
+fn _cyim_lsp_on_ref_select(s, idx) {
+    if (_cyim_lsp_refs_uris == 0) { return 0; }
+    if (idx < 0) { return 0; }
+    if (idx >= vec_len(_cyim_lsp_refs_uris)) { return 0; }
+    var uri  = vec_get(_cyim_lsp_refs_uris,  idx);
+    var line = vec_get(_cyim_lsp_refs_lines, idx);
+    var char = vec_get(_cyim_lsp_refs_chars, idx);
+    if (uri == 0) { return 0; }
+    # Strip "file://" prefix per LSP §3.5.
+    var path = uri + 7;
+    var b = plugin_buf_load_file(s, path);
+    if (b == 0) {
+        editor_set_status(s, "lsp: failed to load reference file");
+        return 0 - 1;
+    }
+    var clen_slot[8];
+    store64(&clen_slot, 0);
+    var content = _cyim_lsp_buf_to_flat(b, &clen_slot);
+    if (content == 0) { return 0 - 1; }
+    var off = lsp_pos_lc_to_offset(content, load64(&clen_slot), line, char);
+    buf_move(b, off);
+    return 0;
+}
 
 fn _cyim_lsp_ex_find_refs(s) {
     var path = editor_file_path(s);
@@ -357,27 +550,38 @@ fn _cyim_lsp_ex_find_refs(s) {
         return 0 - 1;
     }
     var blen = load64(&blen_slot);
-    var n = _lsp_diags_count_pattern(resp, blen, "\"uri\":");
-    var n_str = _lsp_doc_itoa(n);
-    if (n_str == 0) { return 0 - 1; }
-    var nl = strlen(n_str);
-    var prefix = "lsp: ";
-    var suffix = " references";
-    var pl = strlen(prefix);
-    var sl = strlen(suffix);
-    if (pl + nl + sl > 39) { nl = 39 - pl - sl; }
-    var off = 0;
+
+    # Parse references into fresh parallel vecs. Replaces any prior
+    # picker's payload — cyim 1.5.0's plugin_list_display semantics
+    # dismiss the old list before displaying the new one, so the
+    # prior on_select can never fire on a stale index.
+    var uris  = vec_new();
+    var lines = vec_new();
+    var chars = vec_new();
+    var n = _cyim_lsp_parse_refs(resp, blen, uris, lines, chars);
+
+    if (n == 0) {
+        editor_set_status(s, "lsp: no references found");
+        return 0;
+    }
+
+    # Build labels.
+    var labels = vec_new();
     var i = 0;
-    while (i < pl) { store8(&_cyim_lsp_refs_msg + off + i, load8(prefix + i)); i = i + 1; }
-    off = off + pl;
-    i = 0;
-    while (i < nl) { store8(&_cyim_lsp_refs_msg + off + i, load8(n_str + i)); i = i + 1; }
-    off = off + nl;
-    i = 0;
-    while (i < sl) { store8(&_cyim_lsp_refs_msg + off + i, load8(suffix + i)); i = i + 1; }
-    off = off + sl;
-    store8(&_cyim_lsp_refs_msg + off, 0);
-    editor_set_status(s, &_cyim_lsp_refs_msg);
+    while (i < n) {
+        var label = _cyim_lsp_label_for_ref(vec_get(uris, i),
+                                             vec_get(lines, i),
+                                             vec_get(chars, i));
+        if (label != 0) { vec_push(labels, label); }
+        i = i + 1;
+    }
+
+    # Stash payload for on_select.
+    _cyim_lsp_refs_uris  = uris;
+    _cyim_lsp_refs_lines = lines;
+    _cyim_lsp_refs_chars = chars;
+
+    plugin_list_display(s, labels, n, &_cyim_lsp_on_ref_select);
     return 0;
 }
 
