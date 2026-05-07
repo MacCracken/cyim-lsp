@@ -129,6 +129,31 @@ diagnostic_provider hook).
   with range) is a perf optimisation; lands when buffers get
   large enough to bite.
 
+### M5 — Inline diag highlighting (v0.5.1) — ✅ shipped 2026-05-06
+
+- Brace-depth + string-aware walker over `"diagnostics":[...]`
+  array (`_lsp_diags_walk_array`). Tracks JSON-string state
+  so embedded `{` / `}` in messages don't fool the splitter.
+- Per-diag extractor pulls `range.start.line`, `severity`,
+  `message` (with two-pass JSON string decoder for the
+  standard `\\ \" \/ \b \f \n \r \t` escapes; `\uXXXX` →
+  `?` for v0.5.1).
+- Per-diag tuples stored on lsp_diags entry +40 as
+  `vec<tuple_ptr>` of 24 B `{line, severity, msg_ptr}`.
+- `_cyim_lsp_diagnostic_provider` walks the tuple list,
+  translates LSP severity (1=error..4=hint) → cyim's `DIAG_*`
+  (3=error..0=hint), pushes via `diag_new(line, sev, msg)` to
+  cyim's render-side out_vec.
+- 15 new test assertions (43 total in lsp_diags.tcyr; was 28).
+
+**Deferred to v0.5.x**:
+- **`\uXXXX` UTF-8 decoding.** Currently emits `?`
+  placeholders. cyrius-lsp doesn't emit these for ASCII so
+  it's a real-world non-issue.
+- **Drain placement.** Still in status_segment (one read sweep
+  per frame, one-frame lag for diag_provider). Move to
+  diagnostic_provider in v0.5.x if the lag bites.
+
 ### M4 — Diagnostics (v0.5.0) — ✅ shipped 2026-05-06 — **cyim 1.4.0 pickup target**
 
 - `lsp_proc_set_nonblock` + `lsp_proc_recv_nb` in subprocess.cyr
@@ -225,8 +250,9 @@ references list.
 
 ## Last updated
 
-2026-05-06 — v0.5.0 shipped (M4, diagnostics) — **cyim 1.4.0
-pickup target met**. publishDiagnostics → per-URI severity
-counts → cyim status segment "E:N W:M I:K H:L". v0.5.1
-(inline diag highlighting via diagnostic_provider hook) is
-the next chunk; v0.6.0 (definition / references) follows.
+2026-05-06 — v0.5.1 shipped (M5, inline diag highlighting).
+publishDiagnostics-to-render round-trip complete: server →
+drain → walker → tuples → diagnostic_provider → cyim's
+diag_new → render-side inline paint. cyim 1.4.x recommended
+pickup. v0.6.0 (`gd` / `gr` definition / references) is the
+next chunk.

@@ -5,13 +5,16 @@
 
 ## Version
 
-**0.5.0** — M4 (diagnostics) shipped 2026-05-06. **cyim 1.4.0
-pickup target.** Server-pushed `publishDiagnostics` →
-per-URI severity counts → cyim status segment "E:N W:M I:K
-H:L". Inline diag highlighting (diagnostic_provider hook) is
-v0.5.1.
+**0.5.1** — M5 (inline diag highlighting) shipped 2026-05-06.
+Per-diag tuples extracted via brace-depth + string-aware walker
+over the publishDiagnostics body; `diagnostic_provider` hook
+pushes them into cyim via `diag_new()`. Completes the
+publishDiagnostics-to-render round-trip.
 
-**0.4.0** — M3 (document sync): didOpen / didChange / didSave.
+**0.5.0** — M4 (diagnostics counts). cyim 1.4.0 pickup target
+shipped.
+
+**0.4.0** — M3 (document sync).
 
 **0.3.0** — M2 (subprocess lifecycle).
 
@@ -57,11 +60,16 @@ v0.5.1.
   builders, lazy-start, didOpen sender. References cyim plugin
   ABI (`editor_buf`, `editor_file_path`, `buf_len`, `buf_get`)
   — only resolves at fold-in into cyim.
-- **`src/lsp_diags.cyr` — per-URI diagnostic state (v0.5.0)**.
+- **`src/lsp_diags.cyr` — per-URI diagnostic state (v0.5.0+)**.
   Public: `lsp_diags_handle_frame`, `lsp_diags_lookup`,
-  `lsp_diags_count`, `lsp_diags_format_status`. Bytescan-based
-  publishDiagnostics parser; 48 B per-URI entry with severity
-  counts. No json stdlib dependency in hot path.
+  `lsp_diags_count`, `lsp_diags_format_status`,
+  **`lsp_diags_entry_count`**, **`lsp_diags_entry_tuple`**,
+  **`lsp_diag_tuple_line/severity/msg`** (v0.5.1).
+  Bytescan-based publishDiagnostics parser plus brace-depth +
+  string-aware array walker. 48 B per-URI entry with severity
+  counts + tuple-vec ptr (+40). 24 B per-diag tuple
+  `{line, severity, msg}`. Two-pass JSON string parser handles
+  short escapes; `\uXXXX` → `?` placeholder for v0.5.1.
 - `src/plugin_init.cyr` — `cyim_lsp_init()` registers six no-op
   callbacks against cyim's plugin ABI; ex_commands
   `:lsp-restart` / `:lsp-status` registered. normal_key
@@ -88,13 +96,12 @@ v0.5.1.
   round-trip (v0.3.0)
 - `tests/lsp_documents.tcyr` — 39 assertions, doc-sync helpers
   (v0.4.0)
-- **`tests/lsp_diags.tcyr` — 28 assertions across 11 groups,
-  all PASS (v0.5.0).** Coverage: bytescan severity counts,
-  URI extract success / failure, frame dispatch for
-  publishDiagnostics + ignore for other methods, state
-  REPLACES on subsequent publishDiagnostics, multi-URI
-  independence, status_segment format (omits zero categories,
-  full E+W+I+H rendering).
+- **`tests/lsp_diags.tcyr` — 43 assertions across 16 groups,
+  all PASS (v0.5.1; was 28 at v0.5.0).** v0.5.0 coverage plus
+  v0.5.1 additions: tuple extraction with nested ranges, JSON
+  escape decoding in messages (\\n → LF), brace-in-string
+  corner case (string-aware splitter), empty array yields
+  zero tuples, replace semantics for tuple list.
 - `fuzz/jsonrpc.fcyr` — random byte feeder; 5000 buffers PASS
   (v0.2.0)
 - `tests/cyim-lsp.bcyr` — benchmark stub (no-op)
@@ -124,13 +131,13 @@ exercised by the v0.1.0 stubs.
 
 ## Next
 
-**v0.5.0 is the cyim 1.4.0 pickup target.** From cyim's side:
-`[plugins.cyim-lsp]` block in `cyrius.cyml` + `include
-"lib/cyim-lsp.cyr"` in `src/main.cyr` + `cyim_lsp_init()` call
-in `main()` after `plugin_init()`. Two-line change picks up
-auto-spawn + status-segment diag counts.
+**v0.5.0 was the cyim 1.4.0 pickup target.** v0.5.1 is the
+recommended cyim 1.4.x pickup — adds inline per-line diag
+highlighting on top of v0.5.0's status-segment counts.
 
-After cyim 1.4.0 ships, cyim-lsp's M5 (v0.5.1 — inline diag
-highlighting via `diagnostic_provider` hook) is the next
-chunk — needs per-line extraction from the publishDiagnostics
-body. Then v0.6.0 (definition / references via `gd` / `gr`).
+After cyim 1.4.x ships with v0.5.1, M6 (**v0.6.0 — navigation
+via `gd` / `gr`**) is the next session-scoped chunk. Needs
+cyim-side normal_key dispatch wiring (the plugin ABI surface
+is in place; the `g` prefix-keymap from cyim's NORMAL mode
+needs to route through plugin_lookup_normal_key — v1.3.5
+shipped the lookup but didn't wire `g`-prefix paths to it).

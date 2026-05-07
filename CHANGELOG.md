@@ -4,6 +4,111 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-05-06
+
+M5 — inline diag highlighting. v0.5.0's no-op
+`_cyim_lsp_diagnostic_provider` is now a real consumer of
+publishDiagnostics: extracts per-diag tuples
+`{line, severity, message}` from the LSP body and pushes them
+into cyim's render-side out_vec via cyim ADR 0004's
+`diag_new()`. cyim's render layer paints them as inline
+markers / gutter glyphs.
+
+This completes the publishDiagnostics-to-render round-trip
+that started at v0.5.0:
+
+```
+server: publishDiagnostics
+  → _lsp_drain_frames                       (v0.5.0)
+  → lsp_diags_handle_frame                  (v0.5.0: counts)
+  → _lsp_diags_walk_array                   (v0.5.1: tuples)
+  → entry +40 vec<{line, severity, message}>
+  → _cyim_lsp_diagnostic_provider           (v0.5.1: pushes)
+  → cyim's diag_new + out_vec               (cyim ADR 0004)
+  → render-side inline paint
+```
+
+cyim 1.4.x picks up v0.5.1 for the second cyim-lsp pickup
+(after the v0.5.0 status_segment cut shipped at cyim 1.4.0).
+
+### Added
+
+- **Brace-depth + string-aware array walker**
+  (`_lsp_diags_walk_array` in `src/lsp_diags.cyr`). Iterates
+  the `"diagnostics":[...]` array, calling
+  `_lsp_diags_extract_one(body, blen, obj_start, obj_end, entry)`
+  for each top-level diag object. Tracks JSON-string state so
+  embedded `{` / `}` characters in messages don't fool the
+  splitter; tracks escape state so `\"` doesn't end a string
+  prematurely.
+- **Per-diag extractor** (`_lsp_diags_extract_one`). Within a
+  diag object's byte range, locates `"start":{` then `"line":N`
+  for the line number (LSP 0-indexed → cyim 1-indexed via +1),
+  `"severity":N` for severity (1-4), and `"message":"..."` for
+  the human-readable message.
+- **JSON string parser** (`_lsp_diag_parse_string`) — two-pass
+  decoder that handles the standard escapes `\\ \" \/ \b \f
+  \n \r \t` and emits `?` placeholders for `\uXXXX` (full
+  UTF-8 escape decoding deferred to v0.5.x; modern LSP servers
+  rarely emit `\u` for the BMP characters that fit in cyim's
+  display).
+- **Per-diag tuple storage** on lsp_diags entry +40
+  (`vec<tuple_ptr>` of 24 B `{line, severity, msg_ptr}`
+  records). Replaced atomically on each publishDiagnostics
+  per LSP §3.7.4.
+- **Public ABI** in `src/lsp_diags.cyr`:
+  `lsp_diags_entry_count(entry)`, `lsp_diags_entry_tuple(entry, idx)`,
+  `lsp_diag_tuple_line/severity/msg(t)`. Frozen for v0.5.x.
+- **`tests/lsp_diags.tcyr`** extended: 5 new groups (15 new
+  assertions; 43 total, was 28). Coverage: tuple extraction
+  with nested ranges, JSON escape decoding in messages,
+  brace-in-string corner case, empty array, replace
+  semantics for tuple list.
+
+### Changed
+
+- **`src/plugin_init.cyr:_cyim_lsp_diagnostic_provider`** —
+  was no-op; now walks the active buffer's URI's tuple list
+  and pushes each diag into out_vec via `diag_new(line,
+  cyim_severity, msg)`. LSP severity (1=error..4=hint)
+  translated to cyim's `DIAG_*` constants (cyim ADR 0004:
+  3=error..0=hint — higher is more severe in cyim's
+  convention).
+- `_lsp_diags_reset` clears entry +40 alongside the four
+  severity counts (each publishDiagnostics replaces both).
+
+### Tests
+
+- `cyrius test` — 6 suites: cyim-lsp.tcyr 2, jsonrpc.tcyr 21,
+  subprocess.tcyr 15, lsp_documents.tcyr 39, **lsp_diags.tcyr
+  43** (+15 from v0.5.0's 28), src/test.cyr 5. Total 125
+  assertions, all PASS.
+- `cyrius fuzz` 1 PASS · `cyrius lint` 0 warnings.
+
+### Notes
+
+- **JSON parser refactor still deferred.** v0.5.1's bytescan +
+  string-aware walker is robust enough for cyrius-lsp's actual
+  output. If a future server emits non-canonical formatting
+  (whitespace inside `"diagnostics":` array, etc.) refactor to
+  json stdlib's `json_parse`. v0.5.1 doesn't preempt it.
+- **`\u` escape rendering**. LSP messages with `\u00XX` codes
+  render as `?` in v0.5.1. cyrius-lsp doesn't emit these for
+  ASCII-range characters (which is everything cyim displays
+  cleanly), so this is a real-world non-issue. Full
+  UTF-8-aware `\u` decode lands when a server actually emits
+  one.
+- **Drain placement unchanged.** Still in
+  `_cyim_lsp_status_segment` (one read sweep per render
+  frame). Could move to `diagnostic_provider` in v0.5.x to
+  remove the one-frame lag between publishDiagnostics arriving
+  and inline paint refreshing; cost is reading earlier in the
+  frame which may delay first paint. Current placement is fine
+  for v0.5.1.
+- **dist/cyim-lsp.cyr** grew 1737 → 2045 lines (+308). The
+  walker, string parser, tuple storage, and the wired
+  diagnostic_provider account for the delta.
+
 ## [0.5.0] — 2026-05-06
 
 M4 — diagnostics. **cyim 1.4.0 pickup target.** First version

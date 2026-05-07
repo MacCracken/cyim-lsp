@@ -23,7 +23,7 @@ fn _emit(s) {
 
 fn main() {
     alloc_init();
-    _emit("cyim-lsp 0.5.0 (diagnostics — cyim 1.4.0 pickup target)");
+    _emit("cyim-lsp 0.5.1 (inline diag highlighting)");
     var v = jsonrpc_version();
     syscall(1, 1, "JSON-RPC version: ", 18);
     _emit(v);

@@ -116,6 +116,62 @@ fn main() {
     assert_eq(_streq(&fmt_buf4, "E:1 W:2 I:1 H:3"), 1, "exact 'E:1 W:2 I:1 H:3'");
     assert_eq(n4, 15, "byte count matches");
 
+    # === v0.5.1: per-diag tuple extraction ===
+
+    test_group("v0.5.1: walker extracts {line, severity, message} tuples");
+    var pd_tup = "{\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"file:///t.cyr\",\"diagnostics\":[{\"range\":{\"start\":{\"line\":4,\"character\":2},\"end\":{\"line\":4,\"character\":8}},\"severity\":1,\"message\":\"undefined symbol\"},{\"range\":{\"start\":{\"line\":12,\"character\":0},\"end\":{\"line\":12,\"character\":5}},\"severity\":2,\"message\":\"unused\"}]}}";
+    lsp_diags_handle_frame(pd_tup, strlen(pd_tup));
+    var et = lsp_diags_lookup("file:///t.cyr");
+    assert_neq(et, 0, "entry created");
+    assert_eq(lsp_diags_entry_count(et), 2, "2 tuples extracted");
+
+    var t0 = lsp_diags_entry_tuple(et, 0);
+    assert_eq(lsp_diag_tuple_line(t0), 5, "tuple[0] line = LSP+1 = 5");
+    assert_eq(lsp_diag_tuple_severity(t0), 1, "tuple[0] severity = 1");
+    assert_eq(_streq(lsp_diag_tuple_msg(t0), "undefined symbol"), 1, "tuple[0] message");
+
+    var t1 = lsp_diags_entry_tuple(et, 1);
+    assert_eq(lsp_diag_tuple_line(t1), 13, "tuple[1] line = 13");
+    assert_eq(lsp_diag_tuple_severity(t1), 2, "tuple[1] severity = 2");
+    assert_eq(_streq(lsp_diag_tuple_msg(t1), "unused"), 1, "tuple[1] message");
+
+    test_group("v0.5.1: walker handles JSON escapes in messages");
+    var pd_esc = "{\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"file:///e.cyr\",\"diagnostics\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":1}},\"severity\":1,\"message\":\"line 1\\nline 2\"}]}}";
+    lsp_diags_handle_frame(pd_esc, strlen(pd_esc));
+    var ee = lsp_diags_lookup("file:///e.cyr");
+    var te = lsp_diags_entry_tuple(ee, 0);
+    var msg_e = lsp_diag_tuple_msg(te);
+    # The \\n in JSON source becomes literal \n in our cstring,
+    # which our parser decodes to byte 10 (LF). Verify byte 6.
+    assert_eq(load8(msg_e + 6), 10, "\\n decoded to LF");
+
+    test_group("v0.5.1: walker handles braces inside string messages");
+    # A message containing { } characters must not confuse the
+    # brace-depth splitter. Without string-awareness, the splitter
+    # would emit an extra spurious diag for the `{` in the
+    # message.
+    var pd_brace = "{\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"file:///br.cyr\",\"diagnostics\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":1}},\"severity\":1,\"message\":\"got {x} expected {y}\"}]}}";
+    lsp_diags_handle_frame(pd_brace, strlen(pd_brace));
+    var ebr = lsp_diags_lookup("file:///br.cyr");
+    assert_eq(lsp_diags_entry_count(ebr), 1, "exactly 1 tuple (string-aware splitter)");
+    var tbr = lsp_diags_entry_tuple(ebr, 0);
+    assert_eq(_streq(lsp_diag_tuple_msg(tbr), "got {x} expected {y}"), 1, "braces in message preserved");
+
+    test_group("v0.5.1: empty diagnostics array yields zero tuples");
+    var pd_empty2 = "{\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"file:///empty.cyr\",\"diagnostics\":[]}}";
+    lsp_diags_handle_frame(pd_empty2, strlen(pd_empty2));
+    var eemp = lsp_diags_lookup("file:///empty.cyr");
+    assert_neq(eemp, 0, "entry exists");
+    assert_eq(lsp_diags_entry_count(eemp), 0, "no tuples");
+
+    test_group("v0.5.1: replace semantics — old tuples gone after re-publish");
+    var pd_first = "{\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"file:///r.cyr\",\"diagnostics\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}},\"severity\":1,\"message\":\"old\"}]}}";
+    lsp_diags_handle_frame(pd_first, strlen(pd_first));
+    assert_eq(lsp_diags_entry_count(lsp_diags_lookup("file:///r.cyr")), 1, "first publish: 1 tuple");
+    var pd_second = "{\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"file:///r.cyr\",\"diagnostics\":[]}}";
+    lsp_diags_handle_frame(pd_second, strlen(pd_second));
+    assert_eq(lsp_diags_entry_count(lsp_diags_lookup("file:///r.cyr")), 0, "after re-publish: tuples gone");
+
     return assert_summary();
 }
 

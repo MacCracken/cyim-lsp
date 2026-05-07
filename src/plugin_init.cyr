@@ -75,12 +75,53 @@ fn _cyim_lsp_status_segment(s) {
 }
 
 fn _cyim_lsp_diagnostic_provider(s, b, out_vec) {
-    # v0.5.1: push collected publishDiagnostics entries from
-    # cyrius-lsp into out_vec via diag_new(line, severity, msg).
-    # v0.5.0 keeps this no-op — counts are surfaced via
-    # status_segment. Inline diag highlighting needs per-line
-    # extraction (line numbers + messages from the publishDiagnostics
-    # body), which lands in v0.5.1.
+    # v0.5.1: walk the per-URI tuple list for the active buffer's
+    # URI and push each diag into cyim's render-side out_vec via
+    # diag_new(line, severity, msg). cyim's render layer paints
+    # them as inline markers / gutter glyphs (concrete shape is
+    # cyim-side; cyim-lsp just feeds the data).
+    #
+    # The drain-of-pending-frames also happens in
+    # _cyim_lsp_status_segment which fires later in the same
+    # render frame, but the diag map state we walk here
+    # reflects the *previous* frame's drained data. In practice
+    # that's a one-frame lag — the user types, post_change fires
+    # didChange, server replies with publishDiagnostics, drain
+    # happens, NEXT frame this hook surfaces them.
+    #
+    # No drain here ourselves: keeping drain in status_segment
+    # avoids two read sweeps per frame. v0.5.x can move drain
+    # earlier if the lag bites.
+    if (out_vec == 0) { return 0; }
+    var path = editor_file_path(s);
+    if (path == 0) { return 0; }
+    var uri = _lsp_path_to_uri(path);
+    if (uri == 0) { return 0; }
+    var entry = lsp_diags_lookup(uri);
+    if (entry == 0) { return 0; }
+    var n = lsp_diags_entry_count(entry);
+    var i = 0;
+    while (i < n) {
+        var t = lsp_diags_entry_tuple(entry, i);
+        if (t != 0) {
+            var line = lsp_diag_tuple_line(t);
+            var sev  = lsp_diag_tuple_severity(t);
+            var msg  = lsp_diag_tuple_msg(t);
+            # LSP severity 1=error, 2=warning, 3=info, 4=hint.
+            # cyim's DIAG_* constants are 0=hint, 1=info,
+            # 2=warning, 3=error (per cyim ADR 0004 §"Severity
+            # constants" — higher is more severe). Translate.
+            var cyim_sev = DIAG_INFO;
+            if (sev == 1) { cyim_sev = DIAG_ERROR; }
+            if (sev == 2) { cyim_sev = DIAG_WARNING; }
+            if (sev == 3) { cyim_sev = DIAG_INFO; }
+            if (sev == 4) { cyim_sev = DIAG_HINT; }
+            if (msg == 0) { msg = "(no message)"; }
+            var d = diag_new(line, cyim_sev, msg);
+            if (d != 0) { vec_push(out_vec, d); }
+        }
+        i = i + 1;
+    }
     return 0;
 }
 
