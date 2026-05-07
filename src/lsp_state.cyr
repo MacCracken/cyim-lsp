@@ -1,0 +1,114 @@
+# lsp_state.cyr — per-buffer LSP document state (v0.4.0)
+#
+# LSP requires per-document tracking:
+#   - URI (file:///...) — sent in every notification
+#   - version (i64) — incremented per didChange (LSP §3.7.5
+#     `versionedTextDocumentIdentifier`)
+#   - opened flag — has didOpen been sent? (controls
+#     didOpen-vs-didChange routing on first post_change)
+#
+# This file owns the table of these entries, indexed by cyim
+# buffer pointer. Linear vec scan for lookup — typical use is
+# 1-10 open buffers, well below where a hashmap pays off.
+#
+# Public surface (frozen for v0.4.x):
+#   lsp_state_init()                      -> 0
+#   lsp_state_lookup(b)                   -> entry ptr or 0
+#   lsp_state_create(b, uri)              -> entry ptr or 0
+#   lsp_state_bump_version(entry)         -> new version
+#   lsp_state_mark_opened(entry)          -> 0
+#   lsp_state_is_opened(entry)            -> 0/1
+#   lsp_state_version(entry)              -> i64
+#   lsp_state_uri(entry)                  -> cstring
+#   lsp_state_buf(entry)                  -> buf ptr
+#
+# Entry shape (32 B):
+#   +0   buf_ptr        (cyim buffer pointer; the lookup key)
+#   +8   version        (i64; starts at 0, bumped to 1 on first
+#                        didOpen/didChange)
+#   +16  opened         (0 = didOpen not yet sent; 1 = sent)
+#   +24  uri            (NUL-term cstring; heap-allocated, owned
+#                        by entry; lives for process lifetime)
+
+var _lsp_state_table = 0;
+
+fn lsp_state_init() {
+    if (_lsp_state_table == 0) { _lsp_state_table = vec_new(); }
+    return 0;
+}
+
+# Lookup an existing entry by buf_ptr. Returns the entry pointer
+# or 0 if not found. Call lsp_state_create to register new buffers.
+fn lsp_state_lookup(b) {
+    if (_lsp_state_table == 0) { return 0; }
+    var n = vec_len(_lsp_state_table);
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(_lsp_state_table, i);
+        if (e != 0) {
+            if (load64(e) == b) { return e; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Create a new entry for buf_ptr `b` with the given URI. Returns
+# the entry pointer or 0 on alloc failure. Caller should check
+# lsp_state_lookup first to avoid duplicates.
+fn lsp_state_create(b, uri) {
+    if (_lsp_state_table == 0) { lsp_state_init(); }
+    var e = alloc(32);
+    if (e == 0) { return 0; }
+    store64(e,      b);
+    store64(e + 8,  0);     # version
+    store64(e + 16, 0);     # opened
+    store64(e + 24, uri);
+    vec_push(_lsp_state_table, e);
+    return e;
+}
+
+# Increment the entry's version and return the new value. LSP
+# spec recommends version 1 for the first didOpen/didChange;
+# starting at 0 and bumping before send gives 1 on the first
+# call.
+fn lsp_state_bump_version(entry) {
+    if (entry == 0) { return 0; }
+    var v = load64(entry + 8) + 1;
+    store64(entry + 8, v);
+    return v;
+}
+
+# Set the opened flag. Called by lsp_documents after didOpen sent.
+fn lsp_state_mark_opened(entry) {
+    if (entry == 0) { return 0; }
+    store64(entry + 16, 1);
+    return 0;
+}
+
+fn lsp_state_is_opened(entry) {
+    if (entry == 0) { return 0; }
+    return load64(entry + 16);
+}
+
+fn lsp_state_version(entry) {
+    if (entry == 0) { return 0; }
+    return load64(entry + 8);
+}
+
+fn lsp_state_uri(entry) {
+    if (entry == 0) { return 0; }
+    return load64(entry + 24);
+}
+
+fn lsp_state_buf(entry) {
+    if (entry == 0) { return 0; }
+    return load64(entry);
+}
+
+# Count of registered buffers — used by `:lsp-status` (v0.5.0+)
+# and tests.
+fn lsp_state_count() {
+    if (_lsp_state_table == 0) { return 0; }
+    return vec_len(_lsp_state_table);
+}

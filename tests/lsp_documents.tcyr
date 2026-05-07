@@ -1,0 +1,143 @@
+# tests/lsp_documents.tcyr — document-sync helpers (v0.4.0)
+#
+# Tests the pure helpers in src/lsp_documents.cyr — JSON-string
+# escape, URI construction, .cyr filter, decimal itoa, message
+# body builders. These don't need cyim's plugin ABI; the
+# handlers (lsp_doc_did_change / lsp_doc_did_save) reference
+# `editor_buf` / `editor_file_path` / `buf_len` / `buf_get`
+# which only resolve at fold-in into cyim. We stub those four
+# here just to satisfy compilation; they're never called by
+# the assertions below.
+#
+# Integration tests against real cyim land in cyim 1.4.0
+# (driving cyim with cyim-lsp folded in).
+
+include "src/jsonrpc.cyr"
+include "src/subprocess.cyr"
+include "src/lsp_client.cyr"
+include "src/lsp_state.cyr"
+
+# Stub cyim plugin ABI symbols. These exist only to make the
+# standalone build compile lsp_documents.cyr; the test never
+# invokes the handler functions that would call them.
+fn editor_buf(s)         { return 0; }
+fn editor_file_path(s)   { return 0; }
+fn buf_len(b)            { return 0; }
+fn buf_get(b, i)         { return 0; }
+
+include "src/lsp_documents.cyr"
+
+# Compare a NUL-term cstring against an expected literal.
+fn _streq(a, b) {
+    var i = 0;
+    while (1 == 1) {
+        var ca = load8(a + i);
+        var cb = load8(b + i);
+        if (ca != cb) { return 0; }
+        if (ca == 0) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Compare buf bytes [0, n) against expected literal of length n.
+fn _bytes_eq(buf, expected, n) {
+    var i = 0;
+    while (i < n) {
+        if (load8(buf + i) != load8(expected + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Build a single-byte source, run JSON escape, return the
+# escaped output as a cstring.
+fn _esc_one_byte(c) {
+    var src[1];
+    store8(&src, c);
+    var dst = alloc(8);
+    var o = _lsp_jesc_byte(c, dst, 0, 8);
+    if (o < 0) { return 0; }
+    store8(dst + o, 0);
+    return dst;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("_lsp_jesc_byte: short escapes for the LSP-required set");
+    assert_eq(_streq(_esc_one_byte(92), "\\\\"), 1, "backslash -> \\\\");
+    assert_eq(_streq(_esc_one_byte(34), "\\\""), 1, "quote -> \\\"");
+    assert_eq(_streq(_esc_one_byte(10), "\\n"), 1, "LF -> \\n");
+    assert_eq(_streq(_esc_one_byte(13), "\\r"), 1, "CR -> \\r");
+    assert_eq(_streq(_esc_one_byte(9),  "\\t"), 1, "TAB -> \\t");
+    assert_eq(_streq(_esc_one_byte(8),  "\\b"), 1, "BS -> \\b");
+    assert_eq(_streq(_esc_one_byte(12), "\\f"), 1, "FF -> \\f");
+
+    test_group("_lsp_jesc_byte: \\u escapes for other control chars");
+    assert_eq(_streq(_esc_one_byte(1),  "\\u0001"), 1, "0x01 -> \\u0001");
+    assert_eq(_streq(_esc_one_byte(31), "\\u001f"), 1, "0x1F -> \\u001f");
+    assert_eq(_streq(_esc_one_byte(7),  "\\u0007"), 1, "BEL -> \\u0007");
+
+    test_group("_lsp_jesc_byte: printable ASCII passes through");
+    assert_eq(_streq(_esc_one_byte(65),  "A"), 1, "'A' -> 'A'");
+    assert_eq(_streq(_esc_one_byte(32),  " "), 1, "' ' -> ' '");
+    assert_eq(_streq(_esc_one_byte(126), "~"), 1, "'~' -> '~'");
+
+    test_group("_lsp_path_to_uri prepends file://");
+    var uri = _lsp_path_to_uri("/foo/bar.cyr");
+    assert_eq(_streq(uri, "file:///foo/bar.cyr"), 1, "absolute path -> file://...");
+
+    test_group("_lsp_path_is_cyr filter");
+    assert_eq(_lsp_path_is_cyr("foo.cyr"), 1, "foo.cyr -> 1");
+    assert_eq(_lsp_path_is_cyr("/abs/path.cyr"), 1, "absolute .cyr -> 1");
+    assert_eq(_lsp_path_is_cyr("foo.txt"), 0, "foo.txt -> 0");
+    assert_eq(_lsp_path_is_cyr("foo"), 0, "no extension -> 0");
+    assert_eq(_lsp_path_is_cyr(""), 0, "empty -> 0");
+    assert_eq(_lsp_path_is_cyr("a.c"), 0, "too short -> 0");
+    assert_eq(_lsp_path_is_cyr(".cyr"), 1, "bare .cyr -> 1");
+
+    test_group("_lsp_doc_itoa decimal conversion");
+    assert_eq(_streq(_lsp_doc_itoa(0),    "0"),    1, "0");
+    assert_eq(_streq(_lsp_doc_itoa(1),    "1"),    1, "1");
+    assert_eq(_streq(_lsp_doc_itoa(42),   "42"),   1, "42");
+    assert_eq(_streq(_lsp_doc_itoa(2026), "2026"), 1, "4-digit");
+
+    test_group("_lsp_doc_build_did_open_params has expected JSON shape");
+    var params = _lsp_doc_build_did_open_params("file:///x.cyr", 1, "hello");
+    assert_neq(params, 0, "build returns non-null");
+    var expected = "{\"textDocument\":{\"uri\":\"file:///x.cyr\",\"languageId\":\"cyrius\",\"version\":1,\"text\":\"hello\"}}";
+    assert_eq(_streq(params, expected), 1, "exact JSON body");
+
+    test_group("_lsp_doc_build_did_change_params has expected JSON shape");
+    var p2 = _lsp_doc_build_did_change_params("file:///x.cyr", 7, "edited");
+    var expected2 = "{\"textDocument\":{\"uri\":\"file:///x.cyr\",\"version\":7},\"contentChanges\":[{\"text\":\"edited\"}]}";
+    assert_eq(_streq(p2, expected2), 1, "exact JSON body");
+
+    test_group("_lsp_doc_build_did_save_params has expected JSON shape");
+    var p3 = _lsp_doc_build_did_save_params("file:///x.cyr");
+    var expected3 = "{\"textDocument\":{\"uri\":\"file:///x.cyr\"}}";
+    assert_eq(_streq(p3, expected3), 1, "exact JSON body");
+
+    test_group("lsp_state vec lookup / create / version-bump");
+    lsp_state_init();
+    var b1 = 1234567;
+    var b2 = 7654321;
+    assert_eq(lsp_state_lookup(b1), 0, "lookup miss returns 0");
+    var e1 = lsp_state_create(b1, "file:///b1.cyr");
+    assert_neq(e1, 0, "create returns non-null");
+    assert_eq(lsp_state_lookup(b1), e1, "lookup hit returns same entry");
+    assert_eq(lsp_state_lookup(b2), 0, "different buf still misses");
+    assert_eq(lsp_state_version(e1), 0, "version starts at 0");
+    assert_eq(lsp_state_bump_version(e1), 1, "first bump -> 1");
+    assert_eq(lsp_state_bump_version(e1), 2, "second bump -> 2");
+    assert_eq(lsp_state_is_opened(e1), 0, "opened starts 0");
+    lsp_state_mark_opened(e1);
+    assert_eq(lsp_state_is_opened(e1), 1, "after mark -> 1");
+    assert_eq(_streq(lsp_state_uri(e1), "file:///b1.cyr"), 1, "URI threaded through");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

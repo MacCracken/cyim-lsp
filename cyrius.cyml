@@ -48,5 +48,7 @@ modules = [
     "src/jsonrpc.cyr",
     "src/subprocess.cyr",
     "src/lsp_client.cyr",
+    "src/lsp_state.cyr",
+    "src/lsp_documents.cyr",
     "src/plugin_init.cyr",
 ]

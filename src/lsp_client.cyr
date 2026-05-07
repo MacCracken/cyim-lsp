@@ -220,16 +220,14 @@ fn _lsp_shutdown_handshake() {
     return 0;
 }
 
-# Spawn `cmd_path` and run the LSP `initialize` handshake.
-# Returns 0 on success, -1 on any failure (already running, spawn
-# failed, handshake failed). Caller may invoke lsp_client_stop
-# afterwards to shut down cleanly.
-fn lsp_client_start(cmd_path) {
+# Spawn + initialize handshake. Internal entry point — public
+# variants vary the cmd argv shape.
+fn _lsp_client_start_with(cmd, arg1, arg2) {
     if (_lsp_proc != 0) {
         # Already attached — caller should stop before restart.
         return 0 - 1;
     }
-    var p = lsp_proc_spawn(cmd_path, 0, 0);
+    var p = lsp_proc_spawn(cmd, arg1, arg2);
     if (p == 0) { return 0 - 1; }
     _lsp_proc = p;
     var rc = _lsp_initialize();
@@ -240,6 +238,21 @@ fn lsp_client_start(cmd_path) {
         return 0 - 1;
     }
     return 0;
+}
+
+# Spawn `cmd_path` (absolute path expected) and run the LSP
+# `initialize` handshake. Returns 0 on success, -1 on any failure
+# (already running, spawn failed, handshake failed).
+fn lsp_client_start(cmd_path) {
+    return _lsp_client_start_with(cmd_path, 0, 0);
+}
+
+# Spawn `cyrius-lsp` via PATH lookup (`/usr/bin/env cyrius-lsp`)
+# and run the initialize handshake. The default entry point used
+# by lsp_documents' lazy-start path. Returns 0 on success, -1 on
+# any failure.
+fn lsp_client_start_default() {
+    return _lsp_client_start_with("/usr/bin/env", "cyrius-lsp", 0);
 }
 
 # Run shutdown handshake then close + reap. Idempotent — safe to

@@ -1,0 +1,380 @@
+# lsp_documents.cyr — LSP document-sync handlers (v0.4.0)
+#
+# Responds to cyim's plugin hooks by sending the appropriate LSP
+# notifications:
+#   post_change_hook(s)       → textDocument/didChange (or didOpen
+#                                if first interaction with this buffer)
+#   post_save_hook(s, path)   → textDocument/didSave
+#
+# Auto-starts cyrius-lsp on first interaction with a .cyr buffer
+# (lazy-start). Subsequent hooks reuse the running server. If
+# start fails, hooks no-op silently — cyim-lsp degrades to
+# "no server attached" without breaking the editor.
+#
+# Buffer filter: v0.4.0 only sends notifications for `.cyr` files.
+# Other languages get skipped. Multi-language support is post-v1.0.
+#
+# Standalone-build hygiene: this file references cyim's plugin ABI
+# surface (`editor_buf`, `editor_file_path`, `buf_len`, `buf_get`)
+# which only resolves at fold-in into cyim's compilation unit.
+# main.cyr does NOT include this file; it's only in [lib].modules.
+
+# === JSON string escape ===
+#
+# Buffer text needs JSON-string-aware escaping before embedding
+# in a `text` field. Encodes the 7 short escapes (\\, \", \b,
+# \f, \n, \r, \t) and `\u00XX` for other control bytes (< 0x20).
+# Printable ASCII passes through; non-ASCII bytes pass through
+# as-is (assumes UTF-8-clean input — the typical cyim/cyrius case).
+
+# Encode one source byte into dst[o..]. Returns new offset, or
+# -1 if dst would overflow dst_cap. Worst case: 6 bytes (\u00XX).
+fn _lsp_jesc_byte(c, dst, o, dst_cap) {
+    if (c == 92) {
+        if (o + 2 > dst_cap) { return 0 - 1; }
+        store8(dst + o,     92);
+        store8(dst + o + 1, 92);
+        return o + 2;
+    }
+    if (c == 34) {
+        if (o + 2 > dst_cap) { return 0 - 1; }
+        store8(dst + o,     92);
+        store8(dst + o + 1, 34);
+        return o + 2;
+    }
+    if (c == 10) {
+        if (o + 2 > dst_cap) { return 0 - 1; }
+        store8(dst + o,     92);
+        store8(dst + o + 1, 110);
+        return o + 2;
+    }
+    if (c == 13) {
+        if (o + 2 > dst_cap) { return 0 - 1; }
+        store8(dst + o,     92);
+        store8(dst + o + 1, 114);
+        return o + 2;
+    }
+    if (c == 9) {
+        if (o + 2 > dst_cap) { return 0 - 1; }
+        store8(dst + o,     92);
+        store8(dst + o + 1, 116);
+        return o + 2;
+    }
+    if (c == 8) {
+        if (o + 2 > dst_cap) { return 0 - 1; }
+        store8(dst + o,     92);
+        store8(dst + o + 1, 98);
+        return o + 2;
+    }
+    if (c == 12) {
+        if (o + 2 > dst_cap) { return 0 - 1; }
+        store8(dst + o,     92);
+        store8(dst + o + 1, 102);
+        return o + 2;
+    }
+    if (c < 32) {
+        # \u00XX — six bytes total. Escape any other control byte
+        # we didn't catch above. JSON spec requires escaping all
+        # bytes < 0x20 inside string literals.
+        if (o + 6 > dst_cap) { return 0 - 1; }
+        store8(dst + o,     92);
+        store8(dst + o + 1, 117);
+        store8(dst + o + 2, 48);
+        store8(dst + o + 3, 48);
+        var hi = c / 16;
+        var lo = c - hi * 16;
+        if (hi < 10) { store8(dst + o + 4, 48 + hi); }
+        if (hi >= 10) { store8(dst + o + 4, 87 + hi); }
+        if (lo < 10) { store8(dst + o + 5, 48 + lo); }
+        if (lo >= 10) { store8(dst + o + 5, 87 + lo); }
+        return o + 6;
+    }
+    if (o + 1 > dst_cap) { return 0 - 1; }
+    store8(dst + o, c);
+    return o + 1;
+}
+
+# Materialise a cyim gap buffer's contents into a JSON-escaped
+# heap cstring. Returns a NUL-term cstring suitable for embedding
+# inside `"..."` in a JSON message body. 0 on alloc failure.
+fn _lsp_buf_to_json_string(b) {
+    if (b == 0) { return 0; }
+    var blen = buf_len(b);
+    # Worst case: every byte expands to 6 chars (\u00XX). Plus
+    # NUL. Allocate the upper bound — cheap for plugin scale.
+    var cap = blen * 6 + 1;
+    var dst = alloc(cap);
+    if (dst == 0) { return 0; }
+    var o = 0;
+    var i = 0;
+    while (i < blen) {
+        o = _lsp_jesc_byte(buf_get(b, i), dst, o, cap);
+        if (o < 0) { return 0; }
+        i = i + 1;
+    }
+    store8(dst + o, 0);
+    return dst;
+}
+
+# === URI construction ===
+#
+# Convert a filesystem path to a `file://...` URI. v0.4.0 assumes
+# absolute paths (which cyim normally produces — `:e <path>`
+# resolves relative paths against cwd before storing). Relative
+# paths get the wrong URI; documenting the limitation here rather
+# than silently fixing in v0.4.0.
+
+fn _lsp_path_to_uri(path) {
+    if (path == 0) { return 0; }
+    var pl = strlen(path);
+    # "file://" (7) + path + NUL
+    var out = alloc(7 + pl + 1);
+    if (out == 0) { return 0; }
+    var prefix = "file://";
+    var i = 0;
+    while (i < 7) {
+        store8(out + i, load8(prefix + i));
+        i = i + 1;
+    }
+    var j = 0;
+    while (j < pl) {
+        store8(out + 7 + j, load8(path + j));
+        j = j + 1;
+    }
+    store8(out + 7 + pl, 0);
+    return out;
+}
+
+# === Filter: only send notifications for cyim/cyrius source ===
+#
+# v0.4.0 supports only `.cyr` files. Other extensions get
+# silently filtered — server doesn't see notifications for them.
+# Multi-language is post-v1.0 (per roadmap "Out of scope").
+
+fn _lsp_path_is_cyr(path) {
+    if (path == 0) { return 0; }
+    var pl = strlen(path);
+    if (pl < 4) { return 0; }
+    if (load8(path + pl - 4) != 46)  { return 0; }   # '.'
+    if (load8(path + pl - 3) != 99)  { return 0; }   # 'c'
+    if (load8(path + pl - 2) != 121) { return 0; }   # 'y'
+    if (load8(path + pl - 1) != 114) { return 0; }   # 'r'
+    return 1;
+}
+
+# === Decimal i64 to cstring (mirrors lsp_client.cyr's pattern). ===
+
+fn _lsp_doc_itoa(n) {
+    if (n == 0) {
+        var z = alloc(2);
+        if (z == 0) { return 0; }
+        store8(z, 48);
+        store8(z + 1, 0);
+        return z;
+    }
+    var tmp[24];
+    var tlen = 0;
+    var v = n;
+    while (v > 0) {
+        store8(&tmp + tlen, 48 + (v - (v / 10) * 10));
+        v = v / 10;
+        tlen = tlen + 1;
+    }
+    var out = alloc(tlen + 1);
+    if (out == 0) { return 0; }
+    var i = 0;
+    while (i < tlen) {
+        store8(out + i, load8(&tmp + tlen - 1 - i));
+        i = i + 1;
+    }
+    store8(out + tlen, 0);
+    return out;
+}
+
+# === didOpen builder ===
+#
+# Body shape (LSP §3.7.5):
+#   {"textDocument": {
+#      "uri": "<uri>",
+#      "languageId": "cyrius",
+#      "version": <n>,
+#      "text": "<escaped text>"
+#   }}
+
+fn _lsp_doc_build_did_open_params(uri, version, text_escaped) {
+    var ul = strlen(uri);
+    var vl_str = _lsp_doc_itoa(version);
+    if (vl_str == 0) { return 0; }
+    var vl = strlen(vl_str);
+    var tl = strlen(text_escaped);
+    # Fixed bytes:
+    #   {"textDocument":{"uri":"<uri>","languageId":"cyrius","version":<v>,"text":"<text>"}}
+    # = 1 + 16 + 1 + 7 + ul + 16 + 6 + vl + 9 + tl + 4 = 60 + ul + vl + tl
+    var cap = 80 + ul + vl + tl;
+    var out = alloc(cap);
+    if (out == 0) { return 0; }
+    var off = 0;
+    off = _lsp_append(out, off, "{\"textDocument\":{\"uri\":\"");
+    off = _lsp_append(out, off, uri);
+    off = _lsp_append(out, off, "\",\"languageId\":\"cyrius\",\"version\":");
+    off = _lsp_append(out, off, vl_str);
+    off = _lsp_append(out, off, ",\"text\":\"");
+    off = _lsp_append(out, off, text_escaped);
+    off = _lsp_append(out, off, "\"}}");
+    store8(out + off, 0);
+    return out;
+}
+
+# Append helper (jsonrpc.cyr's _jr_append is internal there;
+# duplicate here rather than expose it across files).
+fn _lsp_append(dst, off, src) {
+    var sl = strlen(src);
+    var i = 0;
+    while (i < sl) {
+        store8(dst + off + i, load8(src + i));
+        i = i + 1;
+    }
+    return off + sl;
+}
+
+# === didChange builder ===
+#
+# Body shape:
+#   {"textDocument": {"uri":"<uri>","version":<n>},
+#    "contentChanges": [{"text":"<escaped full text>"}]}
+
+fn _lsp_doc_build_did_change_params(uri, version, text_escaped) {
+    var ul = strlen(uri);
+    var vl_str = _lsp_doc_itoa(version);
+    if (vl_str == 0) { return 0; }
+    var vl = strlen(vl_str);
+    var tl = strlen(text_escaped);
+    var cap = 100 + ul + vl + tl;
+    var out = alloc(cap);
+    if (out == 0) { return 0; }
+    var off = 0;
+    off = _lsp_append(out, off, "{\"textDocument\":{\"uri\":\"");
+    off = _lsp_append(out, off, uri);
+    off = _lsp_append(out, off, "\",\"version\":");
+    off = _lsp_append(out, off, vl_str);
+    off = _lsp_append(out, off, "},\"contentChanges\":[{\"text\":\"");
+    off = _lsp_append(out, off, text_escaped);
+    off = _lsp_append(out, off, "\"}]}");
+    store8(out + off, 0);
+    return out;
+}
+
+# === didSave builder ===
+#
+# Body shape:
+#   {"textDocument": {"uri":"<uri>"}}
+# (No `text` field — LSP defaults to "save without text" since
+# the server already has the latest content from prior didChange.)
+
+fn _lsp_doc_build_did_save_params(uri) {
+    var ul = strlen(uri);
+    var cap = 40 + ul;
+    var out = alloc(cap);
+    if (out == 0) { return 0; }
+    var off = 0;
+    off = _lsp_append(out, off, "{\"textDocument\":{\"uri\":\"");
+    off = _lsp_append(out, off, uri);
+    off = _lsp_append(out, off, "\"}}");
+    store8(out + off, 0);
+    return out;
+}
+
+# === Lazy server start ===
+#
+# Spawn cyrius-lsp on first .cyr-file interaction. Uses
+# `/usr/bin/env cyrius-lsp` so PATH lookup happens (cyrius-lsp
+# typically lives at `~/.cyrius/bin/cyrius-lsp` after the
+# standard install, on PATH via cyrius's bin link).
+
+fn _lsp_doc_lazy_start() {
+    if (lsp_client_running() != 0) { return 0; }
+    return lsp_client_start_default();
+}
+
+# === Public hook handlers ===
+
+# Send didOpen for a buffer if not already opened. Caller has
+# already verified the path is .cyr and looked up / created the
+# state entry.
+fn _lsp_doc_send_did_open(b, entry) {
+    if (lsp_state_is_opened(entry) == 1) { return 0; }
+    var uri = lsp_state_uri(entry);
+    var v = lsp_state_bump_version(entry);
+    var text = _lsp_buf_to_json_string(b);
+    if (text == 0) { return 0 - 1; }
+    var params = _lsp_doc_build_did_open_params(uri, v, text);
+    if (params == 0) { return 0 - 1; }
+    var msg = jsonrpc_build_notification("textDocument/didOpen", params);
+    if (msg == 0) { return 0 - 1; }
+    if (_lsp_send_all(msg) != 0) { return 0 - 1; }
+    lsp_state_mark_opened(entry);
+    return 0;
+}
+
+# post_change hook handler — entry point from plugin_init.cyr's
+# `_cyim_lsp_post_change(s)`. Filters non-.cyr buffers; lazy-
+# starts the server; sends didOpen on first interaction; sends
+# didChange thereafter with bumped version + full text payload.
+fn lsp_doc_did_change(s) {
+    var path = editor_file_path(s);
+    if (path == 0) { return 0; }   # scratch buffer
+    if (_lsp_path_is_cyr(path) == 0) { return 0; }
+    if (_lsp_doc_lazy_start() != 0) { return 0; }
+    var b = editor_buf(s);
+    if (b == 0) { return 0; }
+    var entry = lsp_state_lookup(b);
+    if (entry == 0) {
+        var uri = _lsp_path_to_uri(path);
+        if (uri == 0) { return 0; }
+        entry = lsp_state_create(b, uri);
+        if (entry == 0) { return 0; }
+    }
+    if (lsp_state_is_opened(entry) == 0) {
+        return _lsp_doc_send_did_open(b, entry);
+    }
+    # Already opened — send didChange.
+    var v = lsp_state_bump_version(entry);
+    var uri = lsp_state_uri(entry);
+    var text = _lsp_buf_to_json_string(b);
+    if (text == 0) { return 0 - 1; }
+    var params = _lsp_doc_build_did_change_params(uri, v, text);
+    if (params == 0) { return 0 - 1; }
+    var msg = jsonrpc_build_notification("textDocument/didChange", params);
+    if (msg == 0) { return 0 - 1; }
+    return _lsp_send_all(msg);
+}
+
+# post_save hook handler — entry point from plugin_init.cyr's
+# `_cyim_lsp_post_save(s, path)`. Filters non-.cyr; sends
+# didOpen on first interaction (rare — usually a didChange
+# preceded), then didSave.
+fn lsp_doc_did_save(s, path) {
+    if (path == 0) { return 0; }
+    if (_lsp_path_is_cyr(path) == 0) { return 0; }
+    if (_lsp_doc_lazy_start() != 0) { return 0; }
+    var b = editor_buf(s);
+    if (b == 0) { return 0; }
+    var entry = lsp_state_lookup(b);
+    if (entry == 0) {
+        var uri = _lsp_path_to_uri(path);
+        if (uri == 0) { return 0; }
+        entry = lsp_state_create(b, uri);
+        if (entry == 0) { return 0; }
+    }
+    if (lsp_state_is_opened(entry) == 0) {
+        # Save before any change — emit didOpen first per LSP spec.
+        var rc = _lsp_doc_send_did_open(b, entry);
+        if (rc != 0) { return rc; }
+    }
+    var uri = lsp_state_uri(entry);
+    var params = _lsp_doc_build_did_save_params(uri);
+    if (params == 0) { return 0 - 1; }
+    var msg = jsonrpc_build_notification("textDocument/didSave", params);
+    if (msg == 0) { return 0 - 1; }
+    return _lsp_send_all(msg);
+}

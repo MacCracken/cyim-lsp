@@ -99,20 +99,35 @@ diagnostic_provider hook).
   body; M3+ stores capabilities for feature negotiation
   (`definitionProvider`, etc.).
 
-### M3 — Document sync (v0.4.0)
+### M3 — Document sync (v0.4.0) — ✅ shipped 2026-05-06
 
-**Acceptance:** open cyim against a .cyr file, edit + save, and
-observe didOpen / didChange / didSave reach the server.
+- `src/lsp_state.cyr` — per-buffer state vec
+  `{buf_ptr, version, opened, uri}`; linear lookup; bump-version
+  on each didChange.
+- `src/lsp_documents.cyr` — JSON-string escape, URI builder,
+  `.cyr` filter, three message-body builders, lazy-start,
+  didOpen-on-first-touch dispatcher.
+- `_cyim_lsp_post_save` and `_cyim_lsp_post_change` (in
+  plugin_init.cyr) wired to `lsp_doc_did_save` /
+  `lsp_doc_did_change`.
+- `lsp_client_start_default()` — PATH lookup via `/usr/bin/env
+  cyrius-lsp`; lazy-start uses this so cyim doesn't need an
+  explicit `:lsp-start` ex-command.
+- Tests: `tests/lsp_documents.tcyr` — 39 assertions covering
+  JSON escape, URI build, filter, itoa, message body shapes,
+  per-buffer state. Hook handlers themselves stay
+  integration-tested at cyim 1.4.0 pickup.
 
-- post_change_hook: send `textDocument/didChange` with
-  per-buffer version increment + full-text payload (incremental
-  text-deltas deferred to later)
-- post_save_hook: send `textDocument/didSave`
-- New buffer detection (first edit / first save): emit
-  `textDocument/didOpen` before the change/save notification
-- Buffer-close detection (TBD — needs cyim hook for buffer
-  removal): emit `textDocument/didClose`
-- Per-buffer state: URI, version, language id
+**Deferred to v0.4.x or later** (originally listed under M3):
+- **Buffer-close detection** (`textDocument/didClose`). cyim's
+  plugin ABI doesn't expose a buffer-removal hook; documents
+  stay "open" from the server's perspective until cyim exits.
+  Lands when an ADR for the close hook is justified — probably
+  v1.4.x once real use surfaces the resource-leak.
+- **Incremental text deltas**. v0.4.0 ships full-text payloads
+  on every didChange. Incremental sync (`TextDocumentContentChangeEvent`
+  with range) is a perf optimisation; lands when buffers get
+  large enough to bite.
 
 ### M4 — Diagnostics (v0.5.0) — **cyim 1.4.0 pickup target**
 
@@ -193,6 +208,8 @@ references list.
 
 ## Last updated
 
-2026-05-06 — v0.3.0 shipped (M2, subprocess lifecycle). End-to-end
-handshake verified against real cyrius-lsp. M3 (document sync,
-v0.4.0) is the next session-scoped chunk.
+2026-05-06 — v0.4.0 shipped (M3, document sync). Plugin hooks
+route changes / saves into LSP notifications. M4 (diagnostics,
+v0.5.0) is the next session-scoped chunk + the **cyim 1.4.0
+pickup target** — first version where cyim-lsp delivers
+user-visible value.

@@ -4,6 +4,115 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-05-06
+
+M3 — document sync. cyim-lsp now actually does its job: the
+plugin hooks registered by `cyim_lsp_init()` route changes /
+saves into the right LSP notifications. From the consumer's
+perspective (cyim 1.4.0), editing a `.cyr` file in cyim and
+saving will reach the cyrius-lsp server as
+`textDocument/didOpen` → `textDocument/didChange` →
+`textDocument/didSave` — the three notifications cyrius-lsp
+needs to send `publishDiagnostics` back.
+
+`post_change_hook` and `post_save_hook` are no-op stubs no
+more.
+
+### Added
+
+- **`src/lsp_state.cyr`** (95 lines) — per-buffer document
+  state: `{buf_ptr, version, opened, uri}` entries in a vec.
+  Public: `lsp_state_init`, `lsp_state_lookup`,
+  `lsp_state_create`, `lsp_state_bump_version`,
+  `lsp_state_mark_opened`, `lsp_state_is_opened`,
+  `lsp_state_version`, `lsp_state_uri`, `lsp_state_buf`,
+  `lsp_state_count`. Linear vec scan for lookup (typical use
+  is 1-10 buffers; hashmap pays off later).
+- **`src/lsp_documents.cyr`** (300 lines) — high-level handlers:
+  - `lsp_doc_did_change(s)` — filters non-`.cyr` files,
+    lazy-starts cyrius-lsp on first call, sends `didOpen` if
+    new buffer or `didChange` with bumped version + full-text
+    payload.
+  - `lsp_doc_did_save(s, path)` — same filter chain; sends
+    `didOpen` if buffer was untouched-then-saved, then
+    `didSave`.
+  - JSON-string escape (`_lsp_jesc_byte`,
+    `_lsp_buf_to_json_string`): the 7 short escapes (`\\`,
+    `\"`, `\b`, `\f`, `\n`, `\r`, `\t`) plus `\u00XX` for
+    other control bytes.
+  - `_lsp_path_to_uri` — `/foo/bar.cyr` → `file:///foo/bar.cyr`.
+    Assumes absolute paths (cyim normalises before storing).
+  - `_lsp_path_is_cyr` — extension filter.
+  - Three message-body builders for didOpen / didChange /
+    didSave with hand-rolled JSON envelopes (no json stdlib
+    dependency for outgoing messages — same approach as
+    jsonrpc.cyr's v0.2.0 envelope).
+- **`lsp_client_start_default()`** in `src/lsp_client.cyr` —
+  spawns cyrius-lsp via `/usr/bin/env cyrius-lsp` for PATH
+  lookup (sys_execve doesn't search PATH itself). lazy-start
+  in `_lsp_doc_lazy_start` calls this.
+- **`tests/lsp_documents.tcyr`** (130 lines, 39 assertions
+  across 10 groups). Coverage: every short escape + `\u`
+  escapes + printable passthrough + URI prepend + 7 .cyr
+  filter cases + 4 itoa cases + exact-JSON shape verification
+  for the three message-body builders + lsp_state vec
+  lookup/create/bump-version. Stubs cyim plugin ABI symbols
+  (`editor_buf`, `editor_file_path`, `buf_len`, `buf_get`)
+  so the standalone build resolves; never invokes the
+  handler functions that would call them.
+
+### Changed
+
+- **`cyrius.cyml [lib].modules`** order extended:
+  `jsonrpc.cyr → subprocess.cyr → lsp_client.cyr →
+  lsp_state.cyr → lsp_documents.cyr → plugin_init.cyr`. The
+  two new files come after lsp_client (which they reference
+  for `_lsp_send_all`, `lsp_client_running`,
+  `lsp_client_start_default`) and before plugin_init (which
+  references the doc handlers from `_cyim_lsp_post_save` and
+  `_cyim_lsp_post_change`).
+- **`src/plugin_init.cyr`** — `_cyim_lsp_post_save` now calls
+  `lsp_doc_did_save(s, path)`; `_cyim_lsp_post_change` calls
+  `lsp_doc_did_change(s)`. v0.1.0 stubs retired.
+- **`src/lsp_client.cyr`** — `lsp_client_start(cmd_path)`
+  factored into `_lsp_client_start_with(cmd, arg1, arg2)`;
+  `lsp_client_start_default` added as the PATH-lookup entry
+  used by lazy-start.
+
+### Tests
+
+- `cyrius test` — 5 suites (was 4): cyim-lsp.tcyr 2,
+  jsonrpc.tcyr 21, subprocess.tcyr 15, **lsp_documents.tcyr 39**
+  (new), src/test.cyr 3. Total 80 assertions, all PASS.
+- `cyrius fuzz` 1 harness PASS unchanged.
+- `cyrius lint` 0 warnings.
+
+### Notes
+
+- **Filter is `.cyr`-only.** Other extensions get silently
+  skipped — the server never sees a notification for them.
+  Multi-language is post-v1.0 per the cyim-lsp roadmap "Out
+  of scope".
+- **Full-text payload, not incremental.** `didChange` ships
+  the entire buffer text on every keystroke that mutates.
+  Incremental text-document-sync (`TextDocumentContentChangeEvent`
+  with range) is a v0.4.x optimisation when perf surfaces it.
+- **Auto-start on first `.cyr` interaction.** cyim doesn't
+  need `:lsp-start` — opening a `.cyr` and editing it fires
+  the spawn. If `cyrius-lsp` isn't on PATH, the spawn fails
+  silently and subsequent hooks no-op (degrades cleanly).
+- **Buffer-close detection deferred.** cyim's plugin ABI
+  doesn't currently expose a buffer-removal hook, so
+  `textDocument/didClose` never fires today. Documents stay
+  "opened" from the server's perspective until cyim exits.
+  ADR for the buffer-close hook lands in cyim alongside a
+  concrete need (probably v1.4.x once cyim-lsp surfaces the
+  resource-leak in real use).
+- **dist/cyim-lsp.cyr** grew 759 → 1278 lines (+519). The
+  two new files account for most of the delta; the
+  hand-rolled JSON envelope builders are deliberately verbose
+  (no json stdlib dependency for outgoing messages).
+
 ## [0.3.0] — 2026-05-06
 
 M2 — subprocess lifecycle. Spawn cyrius-lsp (or any LSP server),

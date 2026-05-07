@@ -23,7 +23,7 @@ fn _emit(s) {
 
 fn main() {
     alloc_init();
-    _emit("cyim-lsp 0.3.0 (subprocess + framing)");
+    _emit("cyim-lsp 0.4.0 (document sync wired)");
     var v = jsonrpc_version();
     syscall(1, 1, "JSON-RPC version: ", 18);
     _emit(v);

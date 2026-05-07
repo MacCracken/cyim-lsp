@@ -31,13 +31,19 @@
 # linked in and ready."
 
 fn _cyim_lsp_post_save(s, path) {
-    # TODO v0.2.0: send textDocument/didSave to cyrius-lsp subprocess
-    return 0;
+    # v0.4.0: route to lsp_doc_did_save which lazy-starts cyrius-lsp,
+    # filters non-.cyr files, and sends textDocument/didSave (with
+    # an implicit didOpen first if the buffer hadn't been touched
+    # yet).
+    return lsp_doc_did_save(s, path);
 }
 
 fn _cyim_lsp_post_change(s) {
-    # TODO v0.2.0: send textDocument/didChange to cyrius-lsp subprocess
-    return 0;
+    # v0.4.0: route to lsp_doc_did_change which handles the same
+    # lazy-start + filter chain, then sends textDocument/didChange
+    # with the bumped version + full-text payload (or didOpen on
+    # first interaction).
+    return lsp_doc_did_change(s);
 }
 
 fn _cyim_lsp_status_segment(s) {
