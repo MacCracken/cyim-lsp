@@ -19,11 +19,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify version
+      # ── Sanity gates: VERSION matches tag, dist file is present ──
+
+      - name: Verify VERSION matches tag
         run: |
           FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
           TAG_VERSION="${GITHUB_REF_NAME}"
-          test "$FILE_VERSION" = "$TAG_VERSION" || { echo "VERSION ($FILE_VERSION) != tag ($TAG_VERSION)"; exit 1; }
+          if [ "$FILE_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::VERSION ($FILE_VERSION) != tag ($TAG_VERSION)"
+            exit 1
+          fi
+          echo "Version: $FILE_VERSION"
+
+      - name: Verify dist/cyim-lsp.cyr exists at tagged commit
+        # Sandhi-pattern: cyim consumes cyim-lsp via cyrius.cyml
+        # `[plugins.cyim-lsp] modules = ["dist/cyim-lsp.cyr"]`. The
+        # primary release artifact is the **git-committed** distfile
+        # at the tagged commit, not an action-generated upload.
+        # If the committer forgot `cyrius distlib` before tagging,
+        # consumers would get a stale (or missing) bundle. Bail
+        # loudly here so the tag never makes it to release.
+        run: |
+          if [ ! -f dist/cyim-lsp.cyr ]; then
+            echo "::error::dist/cyim-lsp.cyr missing at tagged commit"
+            echo "Run 'cyrius distlib' and commit dist/ before tagging"
+            exit 1
+          fi
+          echo "distfile present: $(wc -l < dist/cyim-lsp.cyr) lines, $(wc -c < dist/cyim-lsp.cyr) bytes"
+
+      # ── Toolchain install (manual tarball, same shape as ci.yml) ──
 
       - name: Install Cyrius toolchain
         run: |
@@ -39,14 +63,61 @@ jobs:
           echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
           echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
 
-      - name: Build
+      # ── Drift guard: dist/cyim-lsp.cyr must match a fresh distlib run ──
+
+      - name: Verify dist/cyim-lsp.cyr is in sync with src/
+        # Regenerate the distfile from the tagged source tree and
+        # compare against what's committed. Catches the case where
+        # someone bumped src/* + VERSION but forgot to re-run
+        # `cyrius distlib`. Without this guard, the tag could ship
+        # a bundle that doesn't reflect the source at the tag, and
+        # downstream consumers would see "old plugin code" with a
+        # "new tag" — confusing failure mode.
         run: |
           cyrius deps
+          cp dist/cyim-lsp.cyr /tmp/committed.cyr
+          cyrius distlib
+          if ! diff -q /tmp/committed.cyr dist/cyim-lsp.cyr > /dev/null; then
+            echo "::error::dist/cyim-lsp.cyr does not match a fresh 'cyrius distlib'"
+            echo "Run 'cyrius distlib' locally and commit dist/ before tagging."
+            echo "--- committed vs regenerated (first 40 lines of diff):"
+            diff /tmp/committed.cyr dist/cyim-lsp.cyr | head -40
+            exit 1
+          fi
+          echo "distfile in sync with src/"
+
+      # ── Build standalone driver as a side-artifact ──
+
+      - name: Build standalone driver
+        # build/cyim-lsp is a CLI for ad-hoc smoke / framing tests
+        # without needing cyim. Side-artifact attached to the
+        # release for download convenience; NOT what plugin
+        # consumers pull (they pull dist/cyim-lsp.cyr via cyrius
+        # deps' git-tag resolution).
+        run: |
           mkdir -p build
-          cyrius build src/main.cyr build/${{ github.event.repository.name }}
+          cyrius build src/main.cyr build/cyim-lsp
+          ls -la build/cyim-lsp
+
+      # ── Generate SHA256 checksums for the release artifacts ──
+
+      - name: Compute checksums
+        run: |
+          cd $GITHUB_WORKSPACE
+          sha256sum dist/cyim-lsp.cyr build/cyim-lsp > SHA256SUMS
+          echo "SHA256SUMS:"
+          cat SHA256SUMS
+
+      # ── Create the GitHub release ──
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          name: cyim-lsp ${{ github.ref_name }}
           generate_release_notes: true
-          files: build/*
+          files: |
+            dist/cyim-lsp.cyr
+            build/cyim-lsp
+            SHA256SUMS
+            LICENSE
+            VERSION
