@@ -40,9 +40,26 @@ jobs:
           cyrius build src/main.cyr build/${{ github.event.repository.name }}
 
       - name: Test
-        # v5.6.28: bare `cyrius test` picks up the [build].test entry
-        # AND auto-discovers tests/*.tcyr — avoids the previous
-        # `cyrius test src/test.cyr` form that hard-failed when the
-        # stub didn't exist (Issue 1) and also wouldn't ever exercise
-        # tests/${proj}.tcyr.
-        run: cyrius test
+        # Explicit per-file loop rather than bare `cyrius test`.
+        # Bare `cyrius test` auto-discovery proved CI-flaky at
+        # cyim-lsp v0.2.0 ("No .tcyr files found in tests/tcyr/
+        # or tests/" despite tests/ having .tcyr files; not
+        # reproducible locally). The explicit loop is robust
+        # against discovery edge cases and surfaces per-file
+        # failures clearly. Add new .tcyr files to tests/ and
+        # they're picked up automatically.
+        run: |
+          set -e
+          fail=0
+          for f in tests/*.tcyr; do
+            [ -f "$f" ] || continue
+            echo "::group::$f"
+            cyrius test "$f" || fail=1
+            echo "::endgroup::"
+          done
+          if [ -f src/test.cyr ]; then
+            echo "::group::src/test.cyr ([build].test)"
+            cyrius test src/test.cyr || fail=1
+            echo "::endgroup::"
+          fi
+          [ $fail -eq 0 ] || { echo "test: one or more suites failed"; exit 1; }
