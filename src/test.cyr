@@ -1,0 +1,40 @@
+# test.cyr — cyim-lsp test entry (compiled by `cyrius test`)
+#
+# v0.1.0: smoke that the standalone library helpers compile and
+# return their stub values. Real protocol tests land at v0.2.0+
+# alongside the JSON-RPC implementation.
+
+include "src/jsonrpc.cyr"
+include "src/lsp_client.cyr"
+
+fn _streq(a, b) {
+    var i = 0;
+    while (1 == 1) {
+        var ca = load8(a + i);
+        var cb = load8(b + i);
+        if (ca != cb) { return 0; }
+        if (ca == 0) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("jsonrpc_version returns '2.0'");
+    var v = jsonrpc_version();
+    assert_eq(_streq(v, "2.0"), 1, "version literal");
+
+    test_group("lsp_client_running starts at 0 (no subprocess)");
+    assert_eq(lsp_client_running(), 0, "no pid attached");
+
+    test_group("lsp_client_describe returns the v0.1.0 stub string");
+    var d = lsp_client_describe();
+    assert_neq(d, 0, "describe non-null");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

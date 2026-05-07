@@ -1,0 +1,40 @@
+# lsp_client.cyr — LSP protocol client
+#
+# High-level handlers for the LSP messages cyim's plugin ABI
+# surfaces map to:
+#   plugin post_save_hook   → textDocument/didSave
+#   plugin post_change_hook → textDocument/didChange
+#   plugin diagnostic_provider ← textDocument/publishDiagnostics
+#   plugin status_segment   ← diag-count summary
+#   plugin normal_key (gd)  → textDocument/definition
+#   plugin normal_key (gr)  → textDocument/references
+#   plugin ex_command       → :lsp-restart, :lsp-status
+#
+# Subprocess shape (per cyrius-lsp `programs/cyrius-lsp.cyr`):
+#   - cyim spawns cyrius-lsp via process.cyr's spawn(cmd, arg1, arg2)
+#   - JSON-RPC over stdin/stdout pipes (Content-Length framed)
+#   - Response correlation by JSON-RPC `id` field
+#   - Server-pushed `publishDiagnostics` notifications drive the
+#     per-buffer diag set that cyim's diagnostic_provider hook
+#     surfaces into `_plugin_render_collect_diagnostics`
+#
+# === Stub for v0.1.0 — full implementation lands in v0.2.0+ ===
+#
+# v0.1.0 establishes the file structure + dist concatenation order
+# so cyim 1.4.0 can land the plugin ABI consumer side cleanly with
+# a no-op LSP client. Real subprocess + protocol handling lands at
+# cyim-lsp v0.2.0 = cyim 1.4.1.
+
+# Subprocess handle. Set to non-zero pid by lsp_client_start() once
+# real implementation lands; until then 0 means "no server attached".
+var _lsp_pid = 0;
+
+fn lsp_client_running() {
+    return _lsp_pid;
+}
+
+# Stub: real version returns server name + version negotiated from
+# the initialize response. v0.1.0 returns the static description.
+fn lsp_client_describe() {
+    return "cyrius-lsp (not yet attached — cyim-lsp v0.1.0 stub)";
+}

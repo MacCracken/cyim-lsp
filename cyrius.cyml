@@ -1,0 +1,51 @@
+[package]
+name = "cyim-lsp"
+version = "${file:VERSION}"
+description = "cyim-lsp — LSP client plugin for cyim. Spawns cyrius-lsp as a subprocess, frames JSON-RPC over pipes, and routes diagnostics / didSave / didChange / definition / references through cyim's plugin ABI."
+license = "GPL-3.0-only"
+language = "cyrius"
+cyrius = "5.9.16"
+
+[build]
+entry = "src/main.cyr"
+test = "src/test.cyr"
+output = "cyim-lsp"
+
+# Stdlib footprint:
+#   syscalls/alloc/fmt/io  — required core
+#   string/str/vec         — message buffers, line storage
+#   assert                 — tests/cyim-lsp.tcyr
+#   json                   — JSON-RPC payload parse / build
+#   process                — spawn(cmd, arg1, arg2) for cyrius-lsp subprocess
+[deps]
+stdlib = [
+    "syscalls",
+    "alloc",
+    "fmt",
+    "io",
+    "string",
+    "str",
+    "vec",
+    "assert",
+    "json",
+    "process",
+]
+
+# `[lib]` drives `cyrius distlib` — concatenates the listed modules
+# into `dist/cyim-lsp.cyr` for downstream consumers (cyim, via
+# `include "lib/cyim-lsp.cyr"` in src/main.cyr per ADR 0003 §4).
+# Single-pass compiler: each module may only reference symbols
+# defined earlier. Order:
+#   jsonrpc.cyr   — Content-Length framing, message build / parse
+#   lsp_client.cyr — LSP protocol (initialize, didSave, didChange,
+#                   publishDiagnostics handlers); references jsonrpc
+#   plugin_init.cyr — cyim_lsp_init() hook registration; references
+#                    cyim's plugin ABI (plugin_register_*, editor_*,
+#                    buf_*) which only resolves when bundled INTO
+#                    cyim's compilation unit.
+[lib]
+modules = [
+    "src/jsonrpc.cyr",
+    "src/lsp_client.cyr",
+    "src/plugin_init.cyr",
+]

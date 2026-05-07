@@ -1,0 +1,30 @@
+# jsonrpc.cyr — JSON-RPC 2.0 framing for LSP
+#
+# LSP messages are JSON-RPC payloads with a Content-Length header:
+#   Content-Length: <N>\r\n
+#   \r\n
+#   <N bytes of JSON>
+#
+# This module provides:
+#   - jsonrpc_build(method, params)  — build a request/notification cstring
+#   - jsonrpc_frame(payload)          — wrap with Content-Length header
+#   - jsonrpc_parse_frame(buf, len)   — strip header, return body offset
+#
+# Self-contained — no plugin ABI references. Bundles into
+# dist/cyim-lsp.cyr first (single-pass compiler dependency
+# ordering); plugin_init.cyr consumes these helpers downstream.
+#
+# Shape pinned at v0.1.0 (cyim-lsp); ABI-frozen alongside cyim's
+# plugin ABI freeze in cyim 1.3.6 / cyim ADR 0004.
+
+# === Stub for v0.1.0 — full implementation lands in v0.2.0+ ===
+#
+# v0.1.0 ships the file as a placeholder so dist/cyim-lsp.cyr has a
+# stable concatenation order and downstream consumers (cyim) can
+# include it. The actual JSON-RPC encoding/decoding lands when the
+# subprocess + LSP protocol code is wired (target: cyim-lsp v0.2.0
+# = cyim 1.4.1).
+
+fn jsonrpc_version() {
+    return "2.0";
+}
