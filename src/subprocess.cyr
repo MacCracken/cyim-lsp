@@ -1,0 +1,156 @@
+# subprocess.cyr — bidirectional-pipe subprocess primitives (v0.3.0)
+#
+# cyim-lsp spawns cyrius-lsp as a subprocess and talks to it over
+# stdin/stdout pipes (LSP protocol convention). This file owns the
+# pipe + fork + exec dance and the per-process handle.
+#
+# Why not stdlib's `process.cyr` `spawn()`? That helper is
+# unidirectional (run + capture stdout). LSP needs both directions
+# in flight simultaneously: parent writes requests / notifications
+# to child stdin while reading responses / publishDiagnostics from
+# child stdout.
+#
+# Public surface (frozen for v0.3.x):
+#   lsp_proc_spawn(cmd, arg1, arg2)       -> proc handle (heap) or 0
+#   lsp_proc_send(proc, buf, len)         -> bytes written, or -1
+#   lsp_proc_recv(proc, buf, max)         -> bytes read, or -1 / 0 (EOF)
+#   lsp_proc_close(proc)                  -> 0 on success, -1 on error
+#   lsp_proc_pid(proc)                    -> child pid, or -1 if closed
+#
+# Proc handle layout (32 B):
+#   +0   pid           i64 (set to -1 by close)
+#   +8   read_fd       i64 (parent reads child stdout)
+#   +16  write_fd      i64 (parent writes to child stdin)
+#   +24  reserved      i64 (future: spawn-side state, e.g. capabilities ptr)
+#
+# Pipe orientation:
+#   p_in[2]:  parent → child (parent writes p_in[1], child reads p_in[0] as stdin)
+#   p_out[2]: child → parent (child writes p_out[1] as stdout, parent reads p_out[0])
+#
+# After fork, parent closes the child's ends; child closes the
+# parent's ends, dup2's its halves to stdin/stdout, then execve.
+
+# Build the argv array for execve. Mirrors process.cyr's `_exec3`
+# but inlined here so we don't need to depend on process.cyr's
+# internal-only helper. argv layout: [cmd, arg1?, arg2?, NULL].
+fn _lsp_proc_exec(cmd, arg1, arg2) {
+    var argv[4];
+    store64(&argv, cmd);
+    var ai = 1;
+    if (arg1 != 0) { store64(&argv + ai * 8, arg1); ai = ai + 1; }
+    if (arg2 != 0) { store64(&argv + ai * 8, arg2); ai = ai + 1; }
+    store64(&argv + ai * 8, 0);
+    var envp[1];
+    store64(&envp, 0);
+    sys_execve(cmd, &argv, &envp);
+    # If execve returns, exec failed.
+    sys_exit(127);
+    return 0;
+}
+
+# Spawn `cmd` with optional arg1 / arg2 (pass 0 to omit). Sets up
+# bidirectional pipes; returns a 32 B proc handle on success, 0 on
+# any failure (pipe / fork / alloc).
+#
+# Caller is responsible for calling lsp_proc_close to reap the
+# child and free the pipe fds. Forgetting close leaks fds + leaves
+# a zombie process; always pair spawn with close.
+fn lsp_proc_spawn(cmd, arg1, arg2) {
+    var p_in[16];
+    var p_out[16];
+    if (sys_pipe(&p_in) < 0) { return 0; }
+    if (sys_pipe(&p_out) < 0) {
+        sys_close(load32(&p_in));
+        sys_close(load32(&p_in + 4));
+        return 0;
+    }
+    var pid = sys_fork();
+    if (pid < 0) {
+        sys_close(load32(&p_in));
+        sys_close(load32(&p_in + 4));
+        sys_close(load32(&p_out));
+        sys_close(load32(&p_out + 4));
+        return 0;
+    }
+    if (pid == 0) {
+        # Child: close parent's ends, wire halves to stdin/stdout.
+        sys_close(load32(&p_in + 4));   # parent's write end of input pipe
+        sys_close(load32(&p_out));      # parent's read end of output pipe
+        sys_dup2(load32(&p_in), 0);     # stdin = read end of input pipe
+        sys_dup2(load32(&p_out + 4), 1); # stdout = write end of output pipe
+        sys_close(load32(&p_in));
+        sys_close(load32(&p_out + 4));
+        _lsp_proc_exec(cmd, arg1, arg2);
+        # Unreachable; _lsp_proc_exec calls sys_exit on failure.
+        sys_exit(127);
+    }
+    # Parent: close child's ends, build the handle.
+    sys_close(load32(&p_in));        # child's read end of input pipe
+    sys_close(load32(&p_out + 4));   # child's write end of output pipe
+    var proc = alloc(32);
+    if (proc == 0) {
+        sys_close(load32(&p_in + 4));
+        sys_close(load32(&p_out));
+        return 0;
+    }
+    store64(proc,      pid);
+    store64(proc + 8,  load32(&p_out));     # parent reads child stdout from here
+    store64(proc + 16, load32(&p_in + 4));  # parent writes to child stdin here
+    store64(proc + 24, 0);
+    return proc;
+}
+
+# Accessors.
+fn lsp_proc_pid(proc) {
+    if (proc == 0) { return 0 - 1; }
+    return load64(proc);
+}
+
+# Write `len` bytes from `buf` to the child's stdin. Returns the
+# write() return value (bytes written, or -errno on failure).
+fn lsp_proc_send(proc, buf, len) {
+    if (proc == 0) { return 0 - 1; }
+    var pid = load64(proc);
+    if (pid < 0) { return 0 - 1; }
+    return sys_write(load64(proc + 16), buf, len);
+}
+
+# Read up to `max` bytes from the child's stdout into `buf`.
+# Returns the read() return value:
+#   > 0  — bytes read
+#   = 0  — EOF (child closed stdout / exited)
+#   < 0  — -errno
+fn lsp_proc_recv(proc, buf, max) {
+    if (proc == 0) { return 0 - 1; }
+    var pid = load64(proc);
+    if (pid < 0) { return 0 - 1; }
+    return sys_read(load64(proc + 8), buf, max);
+}
+
+# Close the child's pipes and reap the process via sys_waitpid.
+# Idempotent: marks the proc handle's pid = -1 after first call so
+# a second close() returns immediately without re-reaping.
+fn lsp_proc_close(proc) {
+    if (proc == 0) { return 0 - 1; }
+    var pid = load64(proc);
+    if (pid < 0) { return 0; }   # already closed
+    sys_close(load64(proc + 8));
+    sys_close(load64(proc + 16));
+    var status_buf[1];
+    sys_waitpid(pid, &status_buf, 0);
+    store64(proc, 0 - 1);   # mark closed
+    return 0;
+}
+
+# Send SIGTERM to the child without closing pipes or reaping.
+# Used by `:lsp-restart` to interrupt an unresponsive server
+# before close-then-respawn. The caller still needs to call
+# lsp_proc_close afterward to reap the zombie. Returns sys_kill's
+# return value.
+fn lsp_proc_kill(proc) {
+    if (proc == 0) { return 0 - 1; }
+    var pid = load64(proc);
+    if (pid < 0) { return 0 - 1; }
+    # SIGTERM = 15
+    return sys_kill(pid, 15);
+}

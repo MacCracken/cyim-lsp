@@ -71,22 +71,33 @@ diagnostic_provider hook).
   body_off + body_len ≤ buf_len on success} hold across all
   iterations
 
-### M2 — Subprocess lifecycle (v0.3.0)
+### M2 — Subprocess lifecycle (v0.3.0) — ✅ shipped 2026-05-06
 
-**Acceptance:** spawn cyrius-lsp from a test, observe the
-`initialize` handshake complete, then clean shutdown.
+- `src/subprocess.cyr` — bidirectional pipe primitives via
+  `sys_pipe` × 2 + `sys_fork` + `sys_dup2` + `sys_execve`. Public
+  API: `lsp_proc_spawn / send / recv / close / kill / pid`. 32 B
+  handle struct.
+- `src/lsp_client.cyr` — `lsp_client_start(cmd_path)` runs spawn
+  + `initialize` request + response + `initialized` notification.
+  `lsp_client_stop()` runs `shutdown` request + response + `exit`
+  notification + `sys_waitpid` reap.
+- `_lsp_recv_frame` — accumulating frame reader on top of
+  `jsonrpc_parse_frame` + `lsp_proc_recv`. 8 KB cap.
+- Verified end-to-end against `/home/macro/.cyrius/bin/cyrius-lsp`:
+  initialize / initialized / shutdown / exit all clean.
+- Tests: `tests/subprocess.tcyr` (15 assertions via `/bin/cat`
+  mock — fork + dup2 + pipe orientation + send/recv + close
+  idempotency + EOF on exec-failure).
 
-- Spawn cyrius-lsp via `process.cyr`'s `spawn()` with stdin/stdout
-  pipes (NOT inherited; bidirectional dup2 setup)
-- `initialize` request → response handshake; capture server
-  capabilities
-- `initialized` notification (LSP protocol requirement)
-- Graceful shutdown: `shutdown` request → `exit` notification →
-  process reap
-- `:lsp-restart` ex-command kills + respawns cleanly
-- `:lsp-status` ex-command prints pid + capability summary
-- State stored on the `_lsp_pid` global (extended into a struct
-  with capability fields); `lsp_client_running()` returns the pid
+**Deferred to M3+** (originally listed under M2):
+- `:lsp-restart` / `:lsp-status` ex-command behaviour. The
+  `plugin_register_ex_command` registrations are wired in
+  v0.1.0; the callbacks remain stubs until M3 because the
+  human-visible behaviour ties to per-buffer document sync
+  (`:lsp-status` should report "open documents: N", not just pid).
+- Capability parsing. v0.3.0 discards the initialize response
+  body; M3+ stores capabilities for feature negotiation
+  (`definitionProvider`, etc.).
 
 ### M3 — Document sync (v0.4.0)
 
@@ -182,5 +193,6 @@ references list.
 
 ## Last updated
 
-2026-05-06 — v0.2.0 shipped (M1, JSON-RPC framing). M2
-(subprocess lifecycle, v0.3.0) is the next session-scoped chunk.
+2026-05-06 — v0.3.0 shipped (M2, subprocess lifecycle). End-to-end
+handshake verified against real cyrius-lsp. M3 (document sync,
+v0.4.0) is the next session-scoped chunk.

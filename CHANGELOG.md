@@ -4,6 +4,93 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05-06
+
+M2 — subprocess lifecycle. Spawn cyrius-lsp (or any LSP server),
+run the `initialize` handshake, send `initialized`, and tear down
+cleanly via `shutdown` + `exit`. Verified end-to-end against the
+real `cyrius-lsp` binary from the cyrius toolchain.
+
+This is the first cyim-lsp version that actually talks to a
+server. v0.2.0 shipped the framing primitives in isolation;
+v0.3.0 wires them across the pipe boundary.
+
+### Added
+
+- **`src/subprocess.cyr`** (140 lines) — bidirectional-pipe
+  primitives. `lsp_proc_spawn(cmd, arg1, arg2)` sets up two pipe
+  pairs, forks, dup2's the child's halves to stdin/stdout, and
+  execs. Returns a 32 B heap handle: `{pid, read_fd, write_fd,
+  reserved}`. Companion API: `lsp_proc_send`, `lsp_proc_recv`,
+  `lsp_proc_close` (idempotent — second close is a no-op),
+  `lsp_proc_kill` (SIGTERM for v0.5.0+ `:lsp-restart`).
+- **Real `lsp_client_start(cmd_path)` / `lsp_client_stop()`** in
+  `src/lsp_client.cyr` (replaces v0.1.0 stubs). Start spawns the
+  server, runs `initialize` request → response → `initialized`
+  notification. Stop runs `shutdown` request → response → `exit`
+  notification → `sys_waitpid`.
+- **`_lsp_recv_frame`** (internal) — accumulating frame reader.
+  Calls `lsp_proc_recv` in a loop, feeds each batch to
+  `jsonrpc_parse_frame`, returns the buffer when a complete frame
+  is parsed. 8 KB cap (handles initialize / shutdown responses;
+  v0.4.0+ may grow for publishDiagnostics on large files).
+- **`_lsp_send_all`** (internal) — handles short writes by
+  looping until all bytes sent.
+- **`lsp_client_describe()`** now renders `cyrius-lsp pid=<n>` or
+  `(not attached)` based on actual state. Inline itoa mirrors
+  cyim's trailing_ws status_segment pattern.
+- **`tests/subprocess.tcyr`** (90 lines, 15 assertions across 8
+  groups). Uses `/bin/cat` as a portable LSP-shaped mock — stdin
+  → stdout pass-through. Tests: spawn returns valid handle, pid
+  > 0, send/recv round-trip, multi-write multi-read, close reaps
+  + marks pid -1, idempotent close, send/recv on closed proc
+  returns -1, exec failure on bad cmd produces EOF on recv.
+
+### Changed
+
+- **`cyrius.cyml`** `[lib].modules` order: `jsonrpc.cyr →
+  subprocess.cyr → lsp_client.cyr → plugin_init.cyr`. subprocess
+  inserted between jsonrpc and lsp_client (lsp_client consumes
+  subprocess primitives plus jsonrpc framing helpers).
+- **`src/main.cyr`** standalone driver: smoke output now reads
+  "cyim-lsp 0.3.0 (subprocess + framing)" and reports the
+  current `lsp_client_describe()` output (which is `(not
+  attached)` until something starts the client).
+
+### Tests
+
+- `cyrius test` — 4 suites (was 3): `tests/cyim-lsp.tcyr` 2,
+  `tests/jsonrpc.tcyr` 21, **`tests/subprocess.tcyr` 15** (new),
+  `src/test.cyr` 3. Total 41 assertions, all PASS.
+- `cyrius fuzz` — 1 harness (jsonrpc parse_frame) PASS unchanged.
+- `cyrius lint` — 0 warnings.
+- **Real-server handshake verified locally** (not in CI suite):
+  spawned `/home/macro/.cyrius/bin/cyrius-lsp`, completed
+  initialize → initialized → shutdown → exit. Server logged
+  `[cyrius-lsp] initialized` and `[cyrius-lsp] shutdown`
+  cleanly. Not run in CI yet because cyrius-lsp isn't always
+  on PATH there; v0.4.0+ adds a CI integration test that
+  guards `cyrius-lsp` availability.
+
+### Notes
+
+- **Plugin behaviour is still no-op at v0.3.0.** The hooks
+  registered by `cyim_lsp_init()` in `src/plugin_init.cyr` are
+  the same v0.1.0 stubs — they don't yet call
+  `lsp_client_start`. M3 / v0.4.0 wires the hooks: post_save →
+  textDocument/didSave, post_change → textDocument/didChange,
+  ex_command `:lsp-restart` → stop+start, etc.
+- **Single-server design**. cyim-lsp v0.x supports one LSP
+  subprocess per cyim process. Multi-server orchestration is
+  post-v1.0 per the roadmap "Out of scope".
+- **Frame size cap is 8 KB.** initialize / shutdown responses
+  are well under this; publishDiagnostics on large files may
+  exceed. Wrap-and-grow lands when the v0.5.0 diagnostic-pump
+  surfaces it.
+- **dist/cyim-lsp.cyr** grew 372 → 742 lines (v0.2.0 → v0.3.0).
+  subprocess.cyr (~140) + lsp_client.cyr extensions (~230) account
+  for the delta.
+
 ## [0.2.0] — 2026-05-06
 
 M1 — JSON-RPC framing.

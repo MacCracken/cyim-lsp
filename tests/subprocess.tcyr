@@ -1,0 +1,94 @@
+# tests/subprocess.tcyr — bidirectional pipe primitives (v0.3.0)
+#
+# Exercises src/subprocess.cyr without depending on cyrius-lsp:
+#   - Spawn `/bin/cat` as a mock subprocess (echoes stdin to stdout)
+#   - Send some bytes
+#   - Read them back
+#   - Close + reap
+#
+# `/bin/cat` is a portable LSP-shaped mock for the wire layer:
+# stdin → stdout pass-through, exits on EOF (when parent closes
+# the write pipe). Proves the fork + dup2 + pipe-orientation +
+# send/recv plumbing works without coupling tests to cyrius-lsp's
+# protocol details.
+#
+# Real LSP integration tests against cyrius-lsp land in v0.4.0 +
+# alongside the document-sync handlers (didOpen / didSave /
+# didChange).
+
+include "src/jsonrpc.cyr"
+include "src/subprocess.cyr"
+
+# Compare byte ranges (no NUL assumption). Returns 1 on match.
+fn _byte_eq(a, b, n) {
+    var i = 0;
+    while (i < n) {
+        if (load8(a + i) != load8(b + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("lsp_proc_spawn /bin/cat returns a non-null handle");
+    var p = lsp_proc_spawn("/bin/cat", 0, 0);
+    assert_neq(p, 0, "spawn handle non-null");
+    assert_gt(lsp_proc_pid(p), 0, "pid > 0");
+
+    test_group("lsp_proc_send writes bytes to child stdin");
+    var msg = "hello\n";
+    var msg_len = strlen(msg);
+    var sent = lsp_proc_send(p, msg, msg_len);
+    assert_eq(sent, msg_len, "all bytes sent in one call");
+
+    test_group("lsp_proc_recv reads echoed bytes from child stdout");
+    var rbuf[16];
+    var got = lsp_proc_recv(p, &rbuf, 16);
+    assert_eq(got, msg_len, "bytes echoed back");
+    assert_eq(_byte_eq(&rbuf, msg, msg_len), 1, "byte-equal to sent");
+
+    test_group("multi-write / multi-read round-trip");
+    var msg2 = "world\n";
+    var msg2_len = strlen(msg2);
+    var sent2 = lsp_proc_send(p, msg2, msg2_len);
+    assert_eq(sent2, msg2_len, "second send ok");
+    var rbuf2[16];
+    var got2 = lsp_proc_recv(p, &rbuf2, 16);
+    assert_eq(got2, msg2_len, "second recv ok");
+    assert_eq(_byte_eq(&rbuf2, msg2, msg2_len), 1, "second roundtrip byte-equal");
+
+    test_group("lsp_proc_close reaps cleanly + marks pid -1");
+    var rc = lsp_proc_close(p);
+    assert_eq(rc, 0, "close returns 0");
+    assert_eq(lsp_proc_pid(p), 0 - 1, "pid marked -1 after close");
+
+    test_group("lsp_proc_close is idempotent");
+    var rc2 = lsp_proc_close(p);
+    assert_eq(rc2, 0, "second close returns 0");
+
+    test_group("send/recv on closed proc returns -1");
+    var sent3 = lsp_proc_send(p, "x", 1);
+    assert_eq(sent3, 0 - 1, "send on closed -> -1");
+    var rbuf3[1];
+    var got3 = lsp_proc_recv(p, &rbuf3, 1);
+    assert_eq(got3, 0 - 1, "recv on closed -> -1");
+
+    test_group("spawn of nonexistent path returns valid handle but child exits 127");
+    # exec failure is signalled by sys_exit(127) in the child;
+    # parent gets a valid handle but the child dies immediately.
+    # Recv returns 0 (EOF) once the close-on-exit fires.
+    var bad = lsp_proc_spawn("/nonexistent-binary-cyim-lsp-test", 0, 0);
+    assert_neq(bad, 0, "handle non-null even for bad cmd (fork ok)");
+    var bad_buf[1];
+    var bad_got = lsp_proc_recv(bad, &bad_buf, 1);
+    # 0 means EOF — child died on exec failure
+    assert_eq(bad_got, 0, "EOF after exec failure");
+    lsp_proc_close(bad);
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

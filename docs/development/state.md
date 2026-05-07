@@ -5,11 +5,14 @@
 
 ## Version
 
-**0.2.0** — M1 (JSON-RPC framing) shipped 2026-05-06. Round-trip
-tested + fuzzed; subprocess wiring (M2) is the next bite.
+**0.3.0** — M2 (subprocess lifecycle) shipped 2026-05-06. Spawn
++ initialize handshake + clean shutdown verified against real
+`cyrius-lsp`. M3 (document sync) is the next bite.
 
-**0.1.0** — scaffolded 2026-05-06 via `cyrius init`; customised
-for sandhi-pattern plugin distfile.
+**0.2.0** — M1 (JSON-RPC framing) shipped 2026-05-06. Round-trip
+tested + fuzzed.
+
+**0.1.0** — scaffolded 2026-05-06 via `cyrius init`.
 
 ## Toolchain
 
@@ -19,14 +22,23 @@ for sandhi-pattern plugin distfile.
 
 ## Source
 
-- `src/jsonrpc.cyr` — **JSON-RPC framing (real, v0.2.0)**.
-  Public: `jsonrpc_version`, `jsonrpc_next_id`,
+- `src/jsonrpc.cyr` — JSON-RPC framing (v0.2.0). Public:
+  `jsonrpc_version`, `jsonrpc_next_id`,
   `jsonrpc_build_notification`, `jsonrpc_build_request`,
-  `jsonrpc_parse_frame`. Internal: `_jr_append`, `_jr_itoa`,
-  `_jr_frame`. Hand-rolled envelope construction; pre-serialized
-  params; tri-state parser return.
-- `src/lsp_client.cyr` — LSP protocol handlers (stub:
-  `lsp_client_running()`, `lsp_client_describe()`)
+  `jsonrpc_parse_frame`.
+- **`src/subprocess.cyr`** — bidirectional-pipe primitives
+  (v0.3.0). Public: `lsp_proc_spawn`, `lsp_proc_send`,
+  `lsp_proc_recv`, `lsp_proc_close` (idempotent), `lsp_proc_kill`,
+  `lsp_proc_pid`. 32 B handle struct; two pipe pairs for
+  bidirectional traffic.
+- **`src/lsp_client.cyr` — LSP protocol client (real, v0.3.0)**.
+  Public: `lsp_client_start(cmd_path)` (spawn + initialize +
+  initialized), `lsp_client_stop` (shutdown + exit + reap),
+  `lsp_client_running` (pid > 0 if attached), `lsp_client_proc`,
+  `lsp_client_describe` (renders "cyrius-lsp pid=<n>" or "(not
+  attached)"). Internal: `_lsp_initialize`,
+  `_lsp_shutdown_handshake`, `_lsp_recv_frame` (8 KB cap),
+  `_lsp_send_all` (handles short writes).
 - `src/plugin_init.cyr` — `cyim_lsp_init()` registers six no-op
   callbacks against cyim's plugin ABI; ex_commands
   `:lsp-restart` / `:lsp-status` registered. normal_key
@@ -47,18 +59,21 @@ for sandhi-pattern plugin distfile.
 
 - `src/test.cyr` (`[build].test`) — 3 assertions, all PASS
 - `tests/cyim-lsp.tcyr` — scaffold smoke (2 assertions, PASS)
-- **`tests/jsonrpc.tcyr` — 21 assertions across 13 groups, all
-  PASS.** Coverage: monotonic id allocator, build → parse
-  round-trip with body-bytes verification, request id-field
-  inclusion, three rejection paths, incomplete-buffer states,
-  zero-length body, notification doesn't consume id.
-- **`fuzz/jsonrpc.fcyr` — random byte feeder. 5000 buffers
-  (length 0–256) through `jsonrpc_parse_frame`. PASS at v0.2.0.
-  `cyrius fuzz` finds it in `fuzz/` (cyrius's default location).**
+- `tests/jsonrpc.tcyr` — 21 assertions, framing round-trip +
+  edge cases (v0.2.0)
+- **`tests/subprocess.tcyr` — 15 assertions across 8 groups,
+  all PASS (v0.3.0).** Coverage: spawn handle non-null, pid > 0,
+  send/recv round-trip via `/bin/cat` mock, multi-write
+  multi-read, close reaps + marks pid -1, idempotent close,
+  send/recv on closed -> -1, EOF on exec-failure.
+- `fuzz/jsonrpc.fcyr` — random byte feeder; 5000 buffers PASS
+  (v0.2.0)
 - `tests/cyim-lsp.bcyr` — benchmark stub (no-op)
-- `tests/cyim-lsp.fcyr` — fuzz stub (legacy scaffold; cyrius
-  fuzz only finds harnesses in `fuzz/`, so the stub is effectively
-  dead — kept for the moment to match the cyrius init shape)
+- `tests/cyim-lsp.fcyr` — fuzz stub (legacy)
+- **Real-server handshake (manual, not CI):** spawned
+  `/home/macro/.cyrius/bin/cyrius-lsp` from a one-off harness;
+  observed `[cyrius-lsp] initialized` then `[cyrius-lsp]
+  shutdown` cleanly. v0.4.0+ adds a guarded CI integration test.
 
 ## Dependencies
 
@@ -80,7 +95,8 @@ exercised by the v0.1.0 stubs.
 
 ## Next
 
-M2 (v0.3.0 — subprocess lifecycle) is the next session-scoped
-chunk per [`roadmap.md`](roadmap.md). Spawn cyrius-lsp via
-`process.cyr`'s `spawn()`, set up bidirectional stdin/stdout
-pipes, run the LSP `initialize` handshake.
+M3 (v0.4.0 — document sync) is the next session-scoped chunk per
+[`roadmap.md`](roadmap.md). Wire the plugin hooks: `post_save` →
+`textDocument/didSave`, `post_change` → `textDocument/didChange`,
+plus per-buffer URI / version state, `:lsp-restart` and
+`:lsp-status` ex-command behavior.

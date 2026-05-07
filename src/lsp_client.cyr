@@ -1,40 +1,254 @@
-# lsp_client.cyr — LSP protocol client
+# lsp_client.cyr — LSP protocol client (v0.3.0)
 #
-# High-level handlers for the LSP messages cyim's plugin ABI
-# surfaces map to:
-#   plugin post_save_hook   → textDocument/didSave
-#   plugin post_change_hook → textDocument/didChange
-#   plugin diagnostic_provider ← textDocument/publishDiagnostics
-#   plugin status_segment   ← diag-count summary
-#   plugin normal_key (gd)  → textDocument/definition
-#   plugin normal_key (gr)  → textDocument/references
-#   plugin ex_command       → :lsp-restart, :lsp-status
+# High-level layer above subprocess.cyr + jsonrpc.cyr:
+#   - Spawns cyrius-lsp (or any LSP server cmd) and runs the
+#     `initialize` handshake
+#   - Owns the per-process state: proc handle (pid + pipe fds),
+#     last received frame, attached/detached flag
+#   - Issues `shutdown` + `exit` cleanly when stopping
 #
-# Subprocess shape (per cyrius-lsp `programs/cyrius-lsp.cyr`):
-#   - cyim spawns cyrius-lsp via process.cyr's spawn(cmd, arg1, arg2)
-#   - JSON-RPC over stdin/stdout pipes (Content-Length framed)
-#   - Response correlation by JSON-RPC `id` field
-#   - Server-pushed `publishDiagnostics` notifications drive the
-#     per-buffer diag set that cyim's diagnostic_provider hook
-#     surfaces into `_plugin_render_collect_diagnostics`
+# Protocol shape (LSP §3.7 LifeCycle):
+#   1. Client → Server: `initialize` request (id=1)
+#   2. Server → Client: `initialize` response (id=1, result has capabilities)
+#   3. Client → Server: `initialized` notification
+#   4. … traffic …
+#   5. Client → Server: `shutdown` request
+#   6. Server → Client: `shutdown` response
+#   7. Client → Server: `exit` notification
+#   8. Server exits
 #
-# === Stub for v0.1.0 — full implementation lands in v0.2.0+ ===
+# v0.3.0 implements 1, 2, 3, 5, 6, 7, 8. Step 4 (real document
+# sync via post_save / post_change hooks) lands in v0.4.0 / M3.
 #
-# v0.1.0 establishes the file structure + dist concatenation order
-# so cyim 1.4.0 can land the plugin ABI consumer side cleanly with
-# a no-op LSP client. Real subprocess + protocol handling lands at
-# cyim-lsp v0.2.0 = cyim 1.4.1.
+# Public surface (frozen for v0.3.x):
+#   lsp_client_running()                  -> pid (>0 if attached, 0 otherwise)
+#   lsp_client_describe()                 -> cstring
+#   lsp_client_start(cmd_path)            -> 0 / -1
+#   lsp_client_stop()                     -> 0 / -1
+#   lsp_client_proc()                     -> proc handle (or 0)
 
-# Subprocess handle. Set to non-zero pid by lsp_client_start() once
-# real implementation lands; until then 0 means "no server attached".
-var _lsp_pid = 0;
+# Per-client state. _lsp_proc holds the subprocess handle; null
+# means "no server attached". Single-server design — multi-server
+# multiplexing is post-v1.0 per the cyim-lsp roadmap "Out of scope".
+var _lsp_proc = 0;
 
+# Static description buffer, regenerated on each `lsp_client_describe`
+# call. 64 bytes accommodates "cyrius-lsp pid=<i64-decimal> (running)"
+# or the "(not attached)" alternative.
+var _lsp_describe_buf[64];
+
+# Public: returns the child pid if attached, 0 if not. Reads past
+# `lsp_proc_close` are safe — the close marks pid = -1, and we
+# treat any non-positive value as detached.
 fn lsp_client_running() {
-    return _lsp_pid;
+    if (_lsp_proc == 0) { return 0; }
+    var pid = lsp_proc_pid(_lsp_proc);
+    if (pid <= 0) { return 0; }
+    return pid;
 }
 
-# Stub: real version returns server name + version negotiated from
-# the initialize response. v0.1.0 returns the static description.
+fn lsp_client_proc() {
+    return _lsp_proc;
+}
+
+# Render a human-readable description into `_lsp_describe_buf` and
+# return a pointer to it. Used by:
+#   - main.cyr's standalone driver (smoke output)
+#   - the v0.5.0+ `:lsp-status` ex-command
 fn lsp_client_describe() {
-    return "cyrius-lsp (not yet attached — cyim-lsp v0.1.0 stub)";
+    var pid = lsp_client_running();
+    if (pid == 0) {
+        var s = "(not attached)";
+        var sl = strlen(s);
+        var i = 0;
+        while (i < sl) {
+            store8(&_lsp_describe_buf + i, load8(s + i));
+            i = i + 1;
+        }
+        store8(&_lsp_describe_buf + sl, 0);
+        return &_lsp_describe_buf;
+    }
+    # "cyrius-lsp pid=" + decimal pid
+    var prefix = "cyrius-lsp pid=";
+    var pl = strlen(prefix);
+    var off = 0;
+    while (off < pl) {
+        store8(&_lsp_describe_buf + off, load8(prefix + off));
+        off = off + 1;
+    }
+    # Inline itoa for pid (mirrors trailing_ws's pattern in cyim).
+    var tmp[24];
+    var tlen = 0;
+    var v = pid;
+    if (v == 0) {
+        store8(&tmp, 48);
+        tlen = 1;
+    } else {
+        while (v > 0) {
+            store8(&tmp + tlen, 48 + (v - (v / 10) * 10));
+            v = v / 10;
+            tlen = tlen + 1;
+        }
+    }
+    var j = 0;
+    while (j < tlen) {
+        store8(&_lsp_describe_buf + off, load8(&tmp + tlen - 1 - j));
+        off = off + 1;
+        j = j + 1;
+    }
+    store8(&_lsp_describe_buf + off, 0);
+    return &_lsp_describe_buf;
+}
+
+# Read one framed JSON-RPC message from the server. Allocates a
+# heap buffer, accumulates bytes via lsp_proc_recv, calls
+# jsonrpc_parse_frame after each read until a complete frame is
+# present (or error / EOF).
+#
+# Writes body offset + length to *off_out / *len_out.
+# Returns the buffer pointer on success, 0 on error (alloc fail,
+# malformed frame, EOF mid-frame, oversized frame).
+#
+# v0.3.0 uses an 8 KB buffer — handles initialize + shutdown
+# responses (typically <2 KB). v0.4.0+ may need to grow for
+# publishDiagnostics on large files; that's a wrap-and-grow
+# refinement.
+fn _lsp_recv_frame(off_out, len_out) {
+    if (_lsp_proc == 0) { return 0; }
+    var cap = 8192;
+    var buf = alloc(cap);
+    if (buf == 0) { return 0; }
+    var total = 0;
+    var go = 1;
+    while (go == 1) {
+        if (total >= cap) {
+            # Frame larger than v0.3.0 buffer cap.
+            return 0;
+        }
+        var n = lsp_proc_recv(_lsp_proc, buf + total, cap - total);
+        if (n <= 0) {
+            # 0 = EOF mid-frame, < 0 = error.
+            return 0;
+        }
+        total = total + n;
+        var off_slot[8];
+        store64(&off_slot, 0);
+        var len_slot[8];
+        store64(&len_slot, 0);
+        var rc = jsonrpc_parse_frame(buf, total, &off_slot, &len_slot);
+        if (rc == 1) {
+            store64(off_out, load64(&off_slot));
+            store64(len_out, load64(&len_slot));
+            return buf;
+        }
+        if (rc == 0 - 1) {
+            return 0;
+        }
+        # rc == 0: incomplete; loop and read more.
+    }
+    return 0;
+}
+
+# Send `msg` (a framed JSON-RPC cstring) to the server, writing
+# all bytes (handling short writes). Returns 0 on success, -1 on
+# error.
+fn _lsp_send_all(msg) {
+    if (_lsp_proc == 0) { return 0 - 1; }
+    var total = strlen(msg);
+    var sent = 0;
+    var go = 1;
+    while (go == 1) {
+        if (sent >= total) { go = 0; }
+        if (go == 1) {
+            var n = lsp_proc_send(_lsp_proc, msg + sent, total - sent);
+            if (n <= 0) { return 0 - 1; }
+            sent = sent + n;
+        }
+    }
+    return 0;
+}
+
+# Send the LSP `initialize` request and wait for the response.
+# Discards capabilities for v0.3.0 (just verifies the response
+# parses cleanly). v0.4.0+ stores capabilities for feature
+# negotiation (e.g. did we get definitionProvider?).
+fn _lsp_initialize() {
+    var id = jsonrpc_next_id();
+    # Minimal initialize params per LSP §3.7.1. processId=null is
+    # accepted by cyrius-lsp; rootUri=null too. capabilities={}
+    # signals "client supports nothing optional".
+    var params = "{\"processId\":null,\"rootUri\":null,\"capabilities\":{}}";
+    var msg = jsonrpc_build_request(id, "initialize", params);
+    if (msg == 0) { return 0 - 1; }
+    if (_lsp_send_all(msg) != 0) { return 0 - 1; }
+    # Read response. v0.3.0 just verifies a frame arrives — no
+    # capability inspection.
+    var off_slot[8];
+    store64(&off_slot, 0);
+    var len_slot[8];
+    store64(&len_slot, 0);
+    var resp = _lsp_recv_frame(&off_slot, &len_slot);
+    if (resp == 0) { return 0 - 1; }
+    # Send `initialized` notification — LSP requires this to
+    # signal "ready to send didOpen" etc. Empty params per spec.
+    var notif = jsonrpc_build_notification("initialized", "{}");
+    if (notif == 0) { return 0 - 1; }
+    if (_lsp_send_all(notif) != 0) { return 0 - 1; }
+    return 0;
+}
+
+# Send `shutdown` request, await response, then send `exit`
+# notification. After this the server should exit on its own;
+# lsp_proc_close still calls sys_waitpid to reap.
+fn _lsp_shutdown_handshake() {
+    var id = jsonrpc_next_id();
+    var msg = jsonrpc_build_request(id, "shutdown", "null");
+    if (msg == 0) { return 0 - 1; }
+    if (_lsp_send_all(msg) != 0) { return 0 - 1; }
+    var off_slot[8];
+    store64(&off_slot, 0);
+    var len_slot[8];
+    store64(&len_slot, 0);
+    var resp = _lsp_recv_frame(&off_slot, &len_slot);
+    if (resp == 0) {
+        # Server may have crashed mid-shutdown; not fatal.
+        return 0 - 1;
+    }
+    var exit_notif = jsonrpc_build_notification("exit", "null");
+    if (exit_notif == 0) { return 0 - 1; }
+    if (_lsp_send_all(exit_notif) != 0) { return 0 - 1; }
+    return 0;
+}
+
+# Spawn `cmd_path` and run the LSP `initialize` handshake.
+# Returns 0 on success, -1 on any failure (already running, spawn
+# failed, handshake failed). Caller may invoke lsp_client_stop
+# afterwards to shut down cleanly.
+fn lsp_client_start(cmd_path) {
+    if (_lsp_proc != 0) {
+        # Already attached — caller should stop before restart.
+        return 0 - 1;
+    }
+    var p = lsp_proc_spawn(cmd_path, 0, 0);
+    if (p == 0) { return 0 - 1; }
+    _lsp_proc = p;
+    var rc = _lsp_initialize();
+    if (rc != 0) {
+        # Handshake failed; clean up.
+        lsp_proc_close(_lsp_proc);
+        _lsp_proc = 0;
+        return 0 - 1;
+    }
+    return 0;
+}
+
+# Run shutdown handshake then close + reap. Idempotent — safe to
+# call when no server is attached. Returns 0 in both cases (the
+# handshake-failure path still closes pipes + reaps).
+fn lsp_client_stop() {
+    if (_lsp_proc == 0) { return 0; }
+    _lsp_shutdown_handshake();
+    lsp_proc_close(_lsp_proc);
+    _lsp_proc = 0;
+    return 0;
 }

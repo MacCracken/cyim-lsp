@@ -10,6 +10,7 @@
 # Stdlib auto-included via cyrius.cyml.
 
 include "src/jsonrpc.cyr"
+include "src/subprocess.cyr"
 include "src/lsp_client.cyr"
 
 # Print a NUL-term cstring + newline. Avoids hand-counting byte
@@ -22,7 +23,7 @@ fn _emit(s) {
 
 fn main() {
     alloc_init();
-    _emit("cyim-lsp 0.1.0 (stub)");
+    _emit("cyim-lsp 0.3.0 (subprocess + framing)");
     var v = jsonrpc_version();
     syscall(1, 1, "JSON-RPC version: ", 18);
     _emit(v);
