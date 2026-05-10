@@ -289,8 +289,20 @@ land here; post-fold extensions land in the vendored copy.
 | 1.4.0 | v0.5.0 (diagnostics) | First useful cyim-lsp consumer; `[plugins.cyim-lsp]` entry in cyim's cyrius.cyml |
 | 1.4.x | v0.6.0+ | Navigation (gd/gr), restart/status ex-commands, etc. |
 | 1.5.0 | v1.0.0 | API-frozen plugin |
+| 1.5.1 | v1.2.0 | `:lsp-find-refs` / `gr` quickfix picker activates |
+| 1.5.3 | v1.2.1 | `lsp_uri_decode` for percent-encoded `file://` URIs |
+| 1.6.3 | **v1.3.0** | Toolchain pin bump cyrius 5.9.16 → 5.10.10 (no source change) |
 
 ## Last updated
+
+2026-05-09 — **v1.3.0 shipped**. Toolchain pin bump cyrius
+5.9.16 → 5.10.10. Pure infrastructure cut — no `[lib]` source
+change, no example-glue change, no behaviour delta. Cut as a
+minor because consumers need to know the toolchain expectation
+moved (vyakarana 2.2.0 set the precedent). cyim 1.6.3 will pick
+it up via `[deps.cyim-lsp].tag = "1.3.0"`. The 1.x freeze (per
+ADR 0001) holds — toolchain pins are explicitly out of the
+freeze envelope.
 
 2026-05-06 — **v1.0.0 shipped**. Public API frozen per ADR 0001;
 cyim 1.4.0 ready to pick up the frozen contract. cyim-lsp 1.x

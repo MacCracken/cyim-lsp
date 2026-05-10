@@ -5,6 +5,8 @@
 
 ## Version
 
+**1.3.0** — Toolchain pin bump cyrius `5.9.16` → `5.10.10` shipped 2026-05-09. Catch-up cut mirroring cyim's 1.6.1 toolchain move. Pure pin change — no `[lib]` source modifications, no example-glue changes, no protocol or behaviour delta. Cut as a minor (1.2.x → 1.3.0) because consumers pinning cyim-lsp need to know the toolchain expectation moved (same convention vyakarana followed at its 2.2.0 cut). cyim's 1.6.1 already moved cyim-lsp's `[package].cyrius` value in-tree; 1.3.0 publishes that as a tag so cyim 1.6.3 can consume via `[deps.cyim-lsp].tag = "1.3.0"`. Distfile regenerated under 5.10.10 — 2305 lines (banner-only delta vs 1.2.1; no symbol changes). All gates green: 7 test suites / 196 assertions / 1 fuzz / 10 src files lint-clean (per-file iteration, fix mirrored from cyim 1.6.2's lint-correctness pass).
+
 **1.2.1** — `lsp_uri_decode(uri)` shipped 2026-05-07. First
 real `[lib]` bundle source change since 1.0.3 — closes cyim's
 F-CO-4 closeout finding (URL-encoded `file://` URIs failed

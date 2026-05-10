@@ -4,6 +4,90 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-05-09
+
+**Toolchain pin bump cyrius `5.9.16` → `5.10.10`.** Catch-up cut
+mirroring cyim's 1.6.1 toolchain move. Pure pin change with no
+`[lib]` source modifications, no example-glue changes, no
+protocol or behaviour delta. Cut as a minor (1.2.x → 1.3.0)
+because consumers pinning cyim-lsp need to know the toolchain
+expectation moved — same convention vyakarana followed at its
+2.2.0 cut.
+
+cyim's 1.6.1 already moved cyim-lsp's `[package].cyrius` value
+in-tree; 1.3.0 publishes that change as a tag so cyim 1.6.3 can
+consume it via `[deps.cyim-lsp].tag = "1.3.0"` instead of the
+1.2.1 distfile under a 5.9.16 banner.
+
+### Changed
+
+- **`cyrius.cyml`** — `[package].cyrius = "5.10.10"` (was
+  `"5.9.16"`). Local toolchain conformed via `cyriusly use 5.10.10`
+  per the pin-authority rule (pin authoritative; local conforms).
+  cyim's 1.6.1 already made this edit in-tree; 1.3.0 is the tag
+  publish.
+- **`dist/cyim-lsp.cyr`** — regenerated under cyrius 5.10.10.
+  Banner now reads `Version: 1.3.0`. Line count **2305**
+  (byte-identical to 1.2.1 modulo the version banner; no `[lib]`
+  symbol changes). Stdlib drift inherited via `cyrius deps` is
+  byte-equivalent under DCE on cyim's consumer side.
+
+### Stdlib drift inherited (informational)
+
+The 5.9.16 → 5.10.10 cyrius window includes stdlib shape changes
+that cyim-lsp inherits via `cyrius deps`:
+
+- `lib/string.cyr` — `strlen` gained an explicit `: i64` return
+  type and a word-at-a-time SWAR implementation. Functionally
+  equivalent.
+- `lib/string.cyr` — `println_int(n: i64)` added. cyim-lsp doesn't
+  consume directly.
+- `lib/str.cyr` — return-type annotations added to `str_from`,
+  `str_new`, `str_from_a`, `str_new_a`. Behaviour unchanged.
+- 5.10.x window broadly: SIMD primitives, multi-stack
+  `#derive(...)` directives, JSON RFC 8259 §7 escape compliance,
+  TLS plumbing, return-cap raise, version-lib path fix. None of
+  these touch cyim-lsp's surface — JSON-RPC framing uses
+  `lib/json.cyr` for parse, and cyim-lsp's own escape pass
+  (`_lsp_jesc_byte`) for build.
+
+None of these affect cyim-lsp's runtime behaviour — gates verify
+identical output across both versions.
+
+### Status
+
+- **No code changes** in `src/`, `tests/`, `fuzz/`, or
+  `docs/examples/`. Pure infrastructure cut. The 1.2.1 surface
+  (`lsp_uri_decode` and friends) is preserved verbatim.
+- **`[lib]` bundle source unchanged.** Same 7 modules:
+  `jsonrpc`, `subprocess`, `lsp_diags`, `lsp_client`, `lsp_state`,
+  `lsp_position`, `lsp_documents`. Banner-only delta in
+  `dist/cyim-lsp.cyr`.
+- **Minimum cyim version** for the 1.3.0 reference glue:
+  cyim 1.5.0 (unchanged from 1.2.0 — the `plugin_list_display`
+  ABI consumer is the gate, not the toolchain pin).
+
+### Verification
+
+- `cyrius test` — **7 suites, 196 assertions PASS**, 0 failures.
+- `cyrius fuzz` — 1 PASS.
+- `cyrius lint` — 10 src files, 0 warnings each (per-file
+  iteration, mirroring cyim 1.6.2's lint-correctness fix).
+- `cyrfmt --check` — 10 files clean.
+- `cyrius distlib` — regenerated `dist/cyim-lsp.cyr` (2305 lines).
+- `cyriusly use 5.10.10` — local toolchain conformed.
+
+### cyim consumer pickup
+
+cyim 1.6.3 (next bite) will:
+1. Bump `[deps.cyim-lsp].tag` 1.2.1 → 1.3.0 in `cyrius.cyml`.
+2. Run `cyrius deps` to re-resolve.
+3. Verify build / test / smoke / fuzz / bench.
+4. Document the pickup in cyim's CHANGELOG.
+
+No cyim source changes expected — banner-only consumer-side
+visible delta.
+
 ## [1.2.1] — 2026-05-07
 
 **`lsp_uri_decode(uri)` — percent-decoding for `file://` URIs.**
