@@ -4,6 +4,113 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-05-09
+
+**`lsp_ref_preview(uri, line, max_chars)` — source-line previews
+in the `:lsp-find-refs` quickfix picker.**
+
+cyim-lsp 1.0.x–1.3.0 surfaced the references picker as
+`filename:line:col` labels — enough to navigate, but the user has
+to actually jump before knowing what's *at* each reference.
+v1.4.0 closes that gap with a public bundle helper that returns
+the source-line snippet for a given `(uri, line)` location,
+leading whitespace stripped, capped at a caller-controlled byte
+count. The reference glue's `_cyim_lsp_label_for_ref` formatter
+appends the snippet after the coordinates, separated by two
+spaces.
+
+This is the **second real `[lib]` bundle source change** in the
+1.x line (after 1.2.1's `lsp_uri_decode`). Cut as a minor
+(1.3.0 → 1.4.0) per ADR 0001's freeze envelope: additions are
+allowed, and a new public symbol on `[lib]` is the kind of
+addition consumers want to see in the version delta.
+
+Closes the **"reference previews"** carry-over item from cyim's
+1.5.x deferred polish list — formally placed as cyim 1.6.5 in
+the catch-up roadmap.
+
+### Added — `[lib]` bundle (`src/lsp_position.cyr`)
+
+- **`lsp_ref_preview(uri, line, max_chars)`** — public helper.
+  Returns a fresh heap cstring; caller doesn't free (matches the
+  `lsp_uri_decode` / `lsp_path_to_uri` / `lsp_pos_extract_uri`
+  lifetime convention). Returns 0 on null uri, non-positive
+  `max_chars`, file-read failure, line out of range, or alloc
+  failure. `line` is 0-indexed (LSP wire format), matching the
+  existing `_cyim_lsp_refs_lines` storage.
+- Read strategy: `file_read_all` into a 1 MiB heap buffer.
+  Files larger than 1 MiB fall back to no-preview (the picker
+  label still surfaces `filename:line:col` and navigates
+  correctly).
+- Edge handling:
+  - **CRLF endings**: trailing CR stripped before cap.
+  - **Leading whitespace** (space + tab): stripped, since
+    typical preview width doesn't justify burning bytes on
+    indentation.
+  - **Empty line**: returns empty cstring (caller can skip it
+    via `strlen`); the label formatter omits the separator
+    when `pl == 0`.
+  - **Tab-indented code**: tab handling matches space —
+    stripped from leading position, kept literal mid-line.
+
+### Changed — `docs/examples/cyim_glue.cyr`
+
+- `_cyim_lsp_label_for_ref(uri, line, char)` — calls
+  `lsp_ref_preview(uri, line, 80)` and appends the result to the
+  label after `filename:line:col` separated by two spaces.
+  `preview_max = 80` comfortably fits typical popup widths
+  without dominating; cyim's `plugin_list_display` truncates
+  further if needed.
+- Falls through cleanly when `lsp_ref_preview` returns 0:
+  `pl > 0` guards both the separator and the copy loop, so the
+  label is byte-identical to 1.3.0's output in the
+  no-preview-available case (file too big / line OOB / alloc
+  fail).
+- Header comment "cyim-lsp bundle helpers consumed" lists the
+  new helper alongside `lsp_uri_decode`.
+
+### Tests
+
+- `tests/lsp_position.tcyr` — **54 → 68 assertions** (+14
+  across 12 new groups for `lsp_ref_preview`):
+  - Plain line, leading-spaces strip, leading-tab strip,
+    cap-at-max_chars (exact strlen verify), CRLF strip,
+    empty-line returns empty cstring, line walk past empty
+    intermediate, line out of range → 0, null uri → 0,
+    `max_chars=0` → 0, `max_chars<0` → 0, missing file → 0.
+  - Fixture: `/tmp/cyim-lsp-ref-preview-test.txt` written
+    via `file_write_all`; 7-line layout exercises every edge.
+- `cyrius test` — **7 suites, 210 assertions PASS** (was 196
+  at 1.3.0).
+- `cyrius fuzz` — 1 PASS.
+- `cyrius lint` — 10 src files, 0 warnings each (per-file
+  iteration).
+- `cyrfmt --check` — 10 files clean.
+- `cyrius distlib` — regenerated `dist/cyim-lsp.cyr`,
+  **2425 lines** (was 2305 at 1.3.0; +120 lines = `lsp_ref_preview`
+  body + module header rewrite for the public-surface listing).
+
+### Status
+
+- **Minimum cyim version** for the 1.4.0 reference glue:
+  cyim 1.5.0 (unchanged — `plugin_list_display` ABI consumer
+  is the gate). Older consumers on cyim-lsp 1.0.x glue continue
+  to work against cyim 1.4.0+ without picking up previews.
+- **ABI freeze** (ADR 0001) holds: 1.4.0 is an additive change
+  (`lsp_ref_preview` is new; no existing symbol changed shape).
+  All 1.x guarantees stand.
+
+### Verification path (cyim 1.6.5 pickup)
+
+When cyim 1.6.5 picks up via `[deps.cyim-lsp].tag = "1.4.0"`
+and updates `src/plugins/lsp_glue.cyr` to mirror this CHANGELOG's
+`docs/examples/cyim_glue.cyr` change, opening a `.cyr` file with
+`cyrius-lsp` on PATH and running `gr` over a symbol surfaces
+`filename:line:col  source-snippet-here` for each reference,
+with leading whitespace stripped and the snippet capped at 80
+bytes. Files >1 MiB or out-of-range lines surface the bare
+`filename:line:col` (graceful fallback), unchanged from 1.3.0.
+
 ## [1.3.0] — 2026-05-09
 
 **Toolchain pin bump cyrius `5.9.16` → `5.10.10`.** Catch-up cut

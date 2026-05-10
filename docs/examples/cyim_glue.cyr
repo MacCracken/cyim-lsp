@@ -40,6 +40,7 @@
 #
 # cyim-lsp bundle helpers consumed (besides the protocol senders):
 #   lsp_uri_decode(uri) -> cstring or 0                       # cyim-lsp 1.2.1
+#   lsp_ref_preview(uri, line, max_chars) -> cstring or 0     # cyim-lsp 1.4.0
 #   editor_buf(s) / editor_file_path(s)           accessors (load64)
 #   editor_set_status(s, msg)                     2-arg cstring set
 #   buf_get(b, i) / buf_len(b)                    buffer-byte access
@@ -455,11 +456,19 @@ fn _cyim_lsp_parse_refs(body, blen, uris, lines, chars) {
     return count;
 }
 
-# Format a "filename:line:col" cstring for one reference. Strips
-# the `file://` prefix from `uri`, takes the last path segment
-# (everything after the last '/'), and 1-indexes (line, char) for
-# display since most editors / LSP UIs surface 1-indexed
-# coordinates to humans even though LSP wire format is 0-indexed.
+# Format a "filename:line:col  preview" cstring for one reference.
+# Strips the `file://` prefix from `uri`, takes the last path
+# segment (everything after the last '/'), and 1-indexes
+# (line, char) for display since most editors / LSP UIs surface
+# 1-indexed coordinates to humans even though LSP wire format is
+# 0-indexed.
+#
+# v1.4.0 appends a source-line preview via `lsp_ref_preview`:
+# leading whitespace stripped, capped at LABEL_PREVIEW_MAX bytes,
+# separated from `filename:line:col` by two spaces. Falls through
+# to the bare label if the preview helper returns 0 (file too
+# large, line out of range, alloc failure, etc.) — the picker
+# still navigates correctly without it.
 fn _cyim_lsp_label_for_ref(uri, line, char) {
     if (uri == 0) { return 0; }
     var ul = strlen(uri);
@@ -478,8 +487,20 @@ fn _cyim_lsp_label_for_ref(uri, line, char) {
     if (char_str == 0) { return 0; }
     var ll = strlen(line_str);
     var cl = strlen(char_str);
-    # name + ':' + line + ':' + char + NUL.
-    var total = name_len + 1 + ll + 1 + cl + 1;
+
+    # v1.4.0: ask the bundle for a preview snippet. 80 bytes
+    # comfortably fits typical popup widths without dominating;
+    # the picker UI truncates further if needed.
+    var preview_max = 80;
+    var preview = lsp_ref_preview(uri, line, preview_max);
+    var pl = 0;
+    if (preview != 0) { pl = strlen(preview); }
+    # Two spaces separator between coords and preview when present.
+    var sep_len = 0;
+    if (pl > 0) { sep_len = 2; }
+
+    # name + ':' + line + ':' + char + sep + preview + NUL.
+    var total = name_len + 1 + ll + 1 + cl + sep_len + pl + 1;
     var out = alloc(total);
     if (out == 0) { return 0; }
     var off = 0;
@@ -497,6 +518,13 @@ fn _cyim_lsp_label_for_ref(uri, line, char) {
     j = 0;
     while (j < cl) { store8(out + off + j, load8(char_str + j)); j = j + 1; }
     off = off + cl;
+    if (pl > 0) {
+        store8(out + off, 32); off = off + 1;        # ' '
+        store8(out + off, 32); off = off + 1;        # ' '
+        j = 0;
+        while (j < pl) { store8(out + off + j, load8(preview + j)); j = j + 1; }
+        off = off + pl;
+    }
     store8(out + off, 0);
     return out;
 }

@@ -12,6 +12,7 @@
 #   lsp_pos_extract_first_line(body, blen)                              -> i64 line or -1
 #   lsp_pos_extract_first_character(body, blen)                         -> i64 char or -1
 #   lsp_uri_decode(uri)                                                 -> cstring or 0  (v1.2.1)
+#   lsp_ref_preview(uri, line, max_chars)                               -> cstring or 0  (v1.4.0)
 #
 # All helpers operate on flat byte buffers; consumers materialize
 # their editor's buffer to a contiguous (ptr, len) before calling.
@@ -223,5 +224,124 @@ fn lsp_uri_decode(uri) {
         }
     }
     store8(out + out_i, 0);
+    return out;
+}
+
+# === Reference previews (v1.4.0) ===
+#
+# `:lsp-find-refs` populates a quickfix picker labeled
+# `filename:line:col`. That's enough to navigate, but doesn't
+# surface what's *at* each reference. v1.4.0 adds
+# `lsp_ref_preview(uri, line, max_chars)` — returns the source
+# line at (uri, line), leading whitespace stripped, capped at
+# `max_chars` bytes. Consumers append it to the picker label.
+#
+# Read strategy: `file_read_all` into a 1 MiB heap buffer.
+# Sufficient for any source file that's plausibly being edited.
+# Files larger than the cap fall back to no-preview (the label
+# still surfaces filename:line:col and navigates correctly).
+#
+# `line` is 0-indexed (LSP wire convention), matching the
+# `_cyim_lsp_refs_lines` storage in the reference glue.
+#
+# Returns a fresh heap cstring; caller doesn't free (matches the
+# `lsp_uri_decode` lifetime convention). Returns 0 on:
+#   - null uri or non-positive max_chars
+#   - URI that doesn't start with "file://" (we strip 7 bytes and
+#     hand the remainder to `lsp_uri_decode`; a non-file URI hits
+#     a path that doesn't open)
+#   - `file_read_all` failure (file missing / too large / I/O error)
+#   - line out of range
+#   - alloc failure
+
+fn lsp_ref_preview(uri, line, max_chars) {
+    if (uri == 0) { return 0; }
+    if (max_chars <= 0) { return 0; }
+
+    var path = lsp_uri_decode(uri + 7);
+    if (path == 0) { return 0; }
+
+    var cap = 1048576;   # 1 MiB
+    var buf = alloc(cap);
+    if (buf == 0) { return 0; }
+    var n = file_read_all(path, buf, cap);
+    if (n <= 0) { return 0; }
+
+    # Walk to start of line `line` (0-indexed). Flag-pattern loop
+    # because `break` with var-decls is unreliable in Cyrius.
+    var line_start = 0;
+    var lines_seen = 0;
+    var i = 0;
+    var walking = 1;
+    while (walking == 1) {
+        if (i >= n) {
+            walking = 0;
+        } else {
+            if (lines_seen >= line) {
+                walking = 0;
+            } else {
+                if (load8(buf + i) == 10) {
+                    lines_seen = lines_seen + 1;
+                    line_start = i + 1;
+                }
+                i = i + 1;
+            }
+        }
+    }
+    if (lines_seen < line) { return 0; }
+
+    # Find end of line (next '\n' or buffer end).
+    var line_end = line_start;
+    var ending = 1;
+    while (ending == 1) {
+        if (line_end >= n) {
+            ending = 0;
+        } else {
+            if (load8(buf + line_end) == 10) {
+                ending = 0;
+            } else {
+                line_end = line_end + 1;
+            }
+        }
+    }
+
+    # Strip trailing CR (handles CRLF endings).
+    if (line_end > line_start) {
+        if (load8(buf + line_end - 1) == 13) { line_end = line_end - 1; }
+    }
+
+    # Strip leading whitespace (space / tab).
+    var stripped = line_start;
+    var stripping = 1;
+    while (stripping == 1) {
+        if (stripped >= line_end) {
+            stripping = 0;
+        } else {
+            var c = load8(buf + stripped);
+            if (c == 32) {
+                stripped = stripped + 1;
+            } else {
+                if (c == 9) {
+                    stripped = stripped + 1;
+                } else {
+                    stripping = 0;
+                }
+            }
+        }
+    }
+
+    var avail = line_end - stripped;
+    if (avail < 0) { avail = 0; }
+    var keep = avail;
+    if (keep > max_chars) { keep = max_chars; }
+
+    var out = alloc(keep + 1);
+    if (out == 0) { return 0; }
+    var k = 0;
+    while (k < keep) {
+        store8(out + k, load8(buf + stripped + k));
+        k = k + 1;
+    }
+    store8(out + keep, 0);
     return out;
 }

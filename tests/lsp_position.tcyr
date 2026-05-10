@@ -174,6 +174,75 @@ fn main() {
     var d13 = lsp_uri_decode("/path/to/foo%20bar%2Fbaz.cyr");
     assert_eq(_streq(d13, "/path/to/foo bar/baz.cyr"), 1, "mixed encoding decoded");
 
+    # === lsp_ref_preview (v1.4.0) ===
+    #
+    # Tests need a real file on disk because lsp_ref_preview's
+    # core path is file_read_all → walk-to-line → strip → cap.
+    # Fixture: /tmp/cyim-lsp-ref-preview-test.txt.
+
+    var fixture_path = "/tmp/cyim-lsp-ref-preview-test.txt";
+    var fixture_uri  = "file:///tmp/cyim-lsp-ref-preview-test.txt";
+    # Layout (0-indexed lines):
+    #   line 0: "first line"
+    #   line 1: "    second line with leading spaces"
+    #   line 2: "\tthird line with leading tab"
+    #   line 3: "fourth line is much much much longer than thirty bytes for the cap test"
+    #   line 4: "trailing CR follows\r" (CRLF — strip CR before cap)
+    #   line 5: "" (empty line)
+    #   line 6: "after empty"
+    var fixture_body = "first line\n    second line with leading spaces\n\tthird line with leading tab\nfourth line is much much much longer than thirty bytes for the cap test\ntrailing CR follows\r\n\nafter empty\n";
+    file_write_all(fixture_path, fixture_body, strlen(fixture_body));
+
+    test_group("ref_preview: line 0 — plain content, no leading whitespace");
+    var p0 = lsp_ref_preview(fixture_uri, 0, 80);
+    assert_eq(_streq(p0, "first line"), 1, "line 0 returned verbatim");
+
+    test_group("ref_preview: line 1 — leading spaces stripped");
+    var p1 = lsp_ref_preview(fixture_uri, 1, 80);
+    assert_eq(_streq(p1, "second line with leading spaces"), 1, "leading 4 spaces stripped");
+
+    test_group("ref_preview: line 2 — leading tab stripped");
+    var p2 = lsp_ref_preview(fixture_uri, 2, 80);
+    assert_eq(_streq(p2, "third line with leading tab"), 1, "leading tab stripped");
+
+    test_group("ref_preview: line 3 — capped at max_chars");
+    var p3 = lsp_ref_preview(fixture_uri, 3, 30);
+    assert_eq(strlen(p3), 30, "exactly max_chars bytes");
+    assert_eq(_streq(p3, "fourth line is much much much "), 1, "first 30 bytes returned");
+
+    test_group("ref_preview: line 4 — CR stripped before cap");
+    var p4 = lsp_ref_preview(fixture_uri, 4, 80);
+    assert_eq(_streq(p4, "trailing CR follows"), 1, "CRLF -> CR stripped");
+
+    test_group("ref_preview: line 5 — empty line returns empty cstring");
+    var p5 = lsp_ref_preview(fixture_uri, 5, 80);
+    assert_eq(_streq(p5, ""), 1, "empty line -> empty output");
+    assert_eq(strlen(p5), 0, "strlen 0 on empty preview");
+
+    test_group("ref_preview: line 6 — line after empty line");
+    var p6 = lsp_ref_preview(fixture_uri, 6, 80);
+    assert_eq(_streq(p6, "after empty"), 1, "line walk handles empty intermediate");
+
+    test_group("ref_preview: line out of range -> 0");
+    var p_oob = lsp_ref_preview(fixture_uri, 999, 80);
+    assert_eq(p_oob, 0, "line 999 -> null");
+
+    test_group("ref_preview: null uri -> 0");
+    var p_null = lsp_ref_preview(0, 0, 80);
+    assert_eq(p_null, 0, "null uri -> null");
+
+    test_group("ref_preview: zero max_chars -> 0");
+    var p_zero = lsp_ref_preview(fixture_uri, 0, 0);
+    assert_eq(p_zero, 0, "max_chars=0 -> null");
+
+    test_group("ref_preview: negative max_chars -> 0");
+    var p_neg = lsp_ref_preview(fixture_uri, 0, 0 - 5);
+    assert_eq(p_neg, 0, "max_chars<0 -> null");
+
+    test_group("ref_preview: missing file -> 0");
+    var p_miss = lsp_ref_preview("file:///tmp/cyim-lsp-this-does-not-exist-12345.txt", 0, 80);
+    assert_eq(p_miss, 0, "missing file -> null");
+
     return assert_summary();
 }
 

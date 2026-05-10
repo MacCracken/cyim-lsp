@@ -292,8 +292,17 @@ land here; post-fold extensions land in the vendored copy.
 | 1.5.1 | v1.2.0 | `:lsp-find-refs` / `gr` quickfix picker activates |
 | 1.5.3 | v1.2.1 | `lsp_uri_decode` for percent-encoded `file://` URIs |
 | 1.6.3 | **v1.3.0** | Toolchain pin bump cyrius 5.9.16 → 5.10.10 (no source change) |
+| 1.6.5 | **v1.4.0** | `lsp_ref_preview(uri, line, max_chars)` — source-line previews in `:lsp-find-refs`; closes the "reference previews" carry-over from cyim 1.5.x deferred polish |
 
 ## Last updated
+
+2026-05-09 — **v1.4.0 shipped**. `lsp_ref_preview(uri, line, max_chars)`
+public bundle helper — source-line previews in `:lsp-find-refs`.
+Second real `[lib]` change in 1.x (after 1.2.1's `lsp_uri_decode`);
+example glue's `_cyim_lsp_label_for_ref` appends preview snippet
+after coordinates. Cut as a minor per ADR 0001's freeze envelope
+(additive symbol). 14 new test assertions across 12 groups;
+210 total. cyim 1.6.5 picks it up.
 
 2026-05-09 — **v1.3.0 shipped**. Toolchain pin bump cyrius
 5.9.16 → 5.10.10. Pure infrastructure cut — no `[lib]` source
