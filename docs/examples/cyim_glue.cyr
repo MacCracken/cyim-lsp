@@ -38,6 +38,10 @@
 #   plugin_list_display(s, items, count, on_select) -> 0      # cyim 1.5.0
 #   KEY_G                                                     # cyim 1.4.2
 #
+# cyim plugin ABI consumed (1.6.6 additions for v1.5.0 open-in-split):
+#   plugin_buf_load_file_split(s, path, direction) -> buf or 0  # cyim 1.6.6
+#   SPLIT_HORIZONTAL (0) / SPLIT_VERTICAL (1)                   # cyim 1.6.6
+#
 # cyim-lsp bundle helpers consumed (besides the protocol senders):
 #   lsp_uri_decode(uri) -> cstring or 0                       # cyim-lsp 1.2.1
 #   lsp_ref_preview(uri, line, max_chars) -> cstring or 0     # cyim-lsp 1.4.0
@@ -366,6 +370,16 @@ var _cyim_lsp_refs_uris  = 0;   # vec<cstring>
 var _cyim_lsp_refs_lines = 0;   # vec<i64> — LSP 0-indexed
 var _cyim_lsp_refs_chars = 0;   # vec<i64> — LSP 0-indexed
 
+# v1.5.0 — open-in-split mode for the references picker.
+# 0 = in-place (default; matches 1.4.0 and earlier behaviour),
+# 1 = horizontal split via plugin_buf_load_file_split + SPLIT_HORIZONTAL,
+# 2 = vertical split via plugin_buf_load_file_split + SPLIT_VERTICAL.
+# Set by `_cyim_lsp_ex_find_refs[/_split/_vsplit]` before calling
+# plugin_list_display; on_select reads at jump time. Reset by every
+# ex-command call so a `:lsp-find-refs-split` followed by
+# `:lsp-find-refs` doesn't carry the split mode forward.
+var _cyim_lsp_ref_split_mode = 0;
+
 # Walk a textDocument/references response body, populating the
 # three parallel vecs. Returns the number of references parsed.
 #
@@ -530,9 +544,18 @@ fn _cyim_lsp_label_for_ref(uri, line, char) {
 }
 
 # plugin_list_display on_select callback. Looks up the (uri, line,
-# char) at `idx`, opens the file via plugin_buf_load_file (dedups
-# against active buflist if already open), materializes content,
-# converts (line, char) → byte offset, jumps cursor.
+# char) at `idx`, opens the file (dedups against active buflist if
+# already open), materializes content, converts (line, char) →
+# byte offset, jumps cursor.
+#
+# v1.5.0: branches on `_cyim_lsp_ref_split_mode`:
+#   0 → plugin_buf_load_file (in-place; same buffer replaces
+#       current pane content; matches pre-1.5.0 behaviour exactly)
+#   1 → plugin_buf_load_file_split(..., SPLIT_HORIZONTAL) — new
+#       pane below current; focus moves to the new pane.
+#   2 → plugin_buf_load_file_split(..., SPLIT_VERTICAL) — new
+#       pane right of current.
+# Mode is set by the ex-command that opened the picker.
 fn _cyim_lsp_on_ref_select(s, idx) {
     if (_cyim_lsp_refs_uris == 0) { return 0; }
     if (idx < 0) { return 0; }
@@ -548,7 +571,15 @@ fn _cyim_lsp_on_ref_select(s, idx) {
         editor_set_status(s, "lsp: failed to decode reference URI");
         return 0 - 1;
     }
-    var b = plugin_buf_load_file(s, path);
+    var b = 0;
+    var mode = _cyim_lsp_ref_split_mode;
+    if (mode == 0) {
+        b = plugin_buf_load_file(s, path);
+    } else {
+        var dir = SPLIT_HORIZONTAL;
+        if (mode == 2) { dir = SPLIT_VERTICAL; }
+        b = plugin_buf_load_file_split(s, path, dir);
+    }
     if (b == 0) {
         editor_set_status(s, "lsp: failed to load reference file");
         return 0 - 1;
@@ -562,7 +593,13 @@ fn _cyim_lsp_on_ref_select(s, idx) {
     return 0;
 }
 
-fn _cyim_lsp_ex_find_refs(s) {
+# v1.5.0 — extracted body shared by the three find-refs ex-commands
+# (in-place / horizontal-split / vertical-split). The only behaviour
+# difference is which mode the on_select callback reads when the
+# user hits Enter; we set `_cyim_lsp_ref_split_mode` here and
+# dispatch into the shared find/parse/display flow.
+fn _cyim_lsp_ex_find_refs_with_mode(s, mode) {
+    _cyim_lsp_ref_split_mode = mode;
     var path = editor_file_path(s);
     if (path == 0) { return 0; }
     if (lsp_path_is_cyr(path) == 0) { return 0; }
@@ -625,6 +662,26 @@ fn _cyim_lsp_ex_find_refs(s) {
     return 0;
 }
 
+# Default in-place behaviour — Enter on a reference replaces the
+# current pane's content with the destination buffer (dedups via
+# plugin_buf_load_file).
+fn _cyim_lsp_ex_find_refs(s) {
+    return _cyim_lsp_ex_find_refs_with_mode(s, 0);
+}
+
+# v1.5.0 — Enter on a reference splits the active window
+# horizontally (new pane below) and loads the destination there;
+# focus moves to the new pane.
+fn _cyim_lsp_ex_find_refs_split(s) {
+    return _cyim_lsp_ex_find_refs_with_mode(s, 1);
+}
+
+# v1.5.0 — same as `_cyim_lsp_ex_find_refs_split` but vertical
+# split (new pane right of current).
+fn _cyim_lsp_ex_find_refs_vsplit(s) {
+    return _cyim_lsp_ex_find_refs_with_mode(s, 2);
+}
+
 # === Public entry — register all hooks ===
 
 fn cyim_lsp_init() {
@@ -635,9 +692,12 @@ fn cyim_lsp_init() {
     # v1.1.0 — gd / gr prefix-keymap (cyim 1.4.2 ABI).
     plugin_register_normal_prefix_key(KEY_G, 100, &_cyim_lsp_gd);   # 'd' = 100
     plugin_register_normal_prefix_key(KEY_G, 114, &_cyim_lsp_gr);   # 'r' = 114
-    plugin_register_ex_command("lsp-restart",   &_cyim_lsp_ex_restart);
-    plugin_register_ex_command("lsp-status",    &_cyim_lsp_ex_status);
-    plugin_register_ex_command("lsp-goto-def",  &_cyim_lsp_ex_goto_def);
-    plugin_register_ex_command("lsp-find-refs", &_cyim_lsp_ex_find_refs);
+    plugin_register_ex_command("lsp-restart",          &_cyim_lsp_ex_restart);
+    plugin_register_ex_command("lsp-status",           &_cyim_lsp_ex_status);
+    plugin_register_ex_command("lsp-goto-def",         &_cyim_lsp_ex_goto_def);
+    plugin_register_ex_command("lsp-find-refs",        &_cyim_lsp_ex_find_refs);
+    # v1.5.0 — open-in-split variants of the references picker.
+    plugin_register_ex_command("lsp-find-refs-split",  &_cyim_lsp_ex_find_refs_split);
+    plugin_register_ex_command("lsp-find-refs-vsplit", &_cyim_lsp_ex_find_refs_vsplit);
     return 0;
 }

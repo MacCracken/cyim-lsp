@@ -293,8 +293,18 @@ land here; post-fold extensions land in the vendored copy.
 | 1.5.3 | v1.2.1 | `lsp_uri_decode` for percent-encoded `file://` URIs |
 | 1.6.3 | **v1.3.0** | Toolchain pin bump cyrius 5.9.16 → 5.10.10 (no source change) |
 | 1.6.5 | **v1.4.0** | `lsp_ref_preview(uri, line, max_chars)` — source-line previews in `:lsp-find-refs`; closes the "reference previews" carry-over from cyim 1.5.x deferred polish |
+| 1.6.7 | **v1.5.0** | Open-in-split ex-commands (`:lsp-find-refs-split` / `:lsp-find-refs-vsplit`); consumer-side activation against cyim 1.6.6's `plugin_buf_load_file_split` ABI; `[lib]` source unchanged, distfile banner-only |
 
 ## Last updated
+
+2026-05-09 — **v1.5.0 shipped**. Open-in-split ex-commands
+(`:lsp-find-refs-split` / `:lsp-find-refs-vsplit`) consume cyim
+1.6.6's `plugin_buf_load_file_split` ABI. `[lib]` source
+unchanged from 1.4.0 (banner-only distfile delta at 2425 lines).
+Pure consumer-side glue activation — same convention as 1.1.0
+and 1.2.0 cuts. Cut as a minor so consumers track the new
+ex-command surface. Public API freeze (ADR 0001) holds. cyim
+1.6.7 picks it up.
 
 2026-05-09 — **v1.4.0 shipped**. `lsp_ref_preview(uri, line, max_chars)`
 public bundle helper — source-line previews in `:lsp-find-refs`.

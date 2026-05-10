@@ -4,6 +4,112 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-05-09
+
+**Open-in-split for `:lsp-find-refs` — consumer-side activation
+against cyim 1.6.6's `plugin_buf_load_file_split` ABI.**
+
+cyim 1.6.6 added `plugin_buf_load_file_split(s, path, direction)`
+plus `SPLIT_HORIZONTAL` / `SPLIT_VERTICAL` constants — the cyim
+side of the long-deferred "open-in-split" carry-over from 1.5.x
+polish. cyim-lsp 1.5.0 is the consumer side: two new ex-commands
+(`:lsp-find-refs-split` / `:lsp-find-refs-vsplit`) thread a mode
+flag into the existing references-picker flow so that selecting
+a result opens it beside the current buffer instead of replacing
+it.
+
+The **`[lib]` bundle source is unchanged at 1.5.0** — banner-only
+distfile delta (2425 lines, byte-identical to 1.4.0). Same
+convention as 1.1.0 / 1.2.0 cuts (consumer-side glue activation
+against new cyim ABI; bundle protocol code untouched). Cut as a
+minor (1.4.x → 1.5.0) so consumers pinning cyim-lsp can track
+the new ex-command surface via the version delta.
+
+Minimum cyim version for the 1.5.0 reference glue: **cyim 1.6.6**
+(the version that introduced `plugin_buf_load_file_split`).
+Consumers on cyim < 1.6.6 stay on cyim-lsp 1.4.0 glue and lose
+nothing functional — the in-place `:lsp-find-refs` continues to
+work.
+
+### Added — `docs/examples/cyim_glue.cyr`
+
+- **`_cyim_lsp_ref_split_mode` module-level state** (i64; default
+  0). Three values: `0` = in-place (matches pre-1.5.0 behaviour
+  exactly), `1` = horizontal split, `2` = vertical split. Set
+  by the entering ex-command, read by `_cyim_lsp_on_ref_select`
+  at jump time. Reset on every ex-command call so a `-split`
+  invocation followed by plain `:lsp-find-refs` doesn't carry
+  the split mode forward.
+- **`_cyim_lsp_ex_find_refs_with_mode(s, mode)`** — extracted
+  shared body of the three find-refs ex-commands. Sets the
+  mode global, then runs the existing find/parse/display flow.
+- **`_cyim_lsp_ex_find_refs_split(s)`** — registered against
+  `:lsp-find-refs-split`. Calls `_cyim_lsp_ex_find_refs_with_mode(s, 1)`.
+- **`_cyim_lsp_ex_find_refs_vsplit(s)`** — registered against
+  `:lsp-find-refs-vsplit`. Calls `_cyim_lsp_ex_find_refs_with_mode(s, 2)`.
+- **`cyim_lsp_init`** registers both new ex-commands alongside
+  the existing four.
+
+### Changed — `docs/examples/cyim_glue.cyr`
+
+- **`_cyim_lsp_on_ref_select`** branches on `_cyim_lsp_ref_split_mode`:
+  - mode 0 → `plugin_buf_load_file(s, path)` (1.4.0 behaviour
+    preserved byte-for-byte).
+  - mode 1 → `plugin_buf_load_file_split(s, path, SPLIT_HORIZONTAL)`.
+  - mode 2 → `plugin_buf_load_file_split(s, path, SPLIT_VERTICAL)`.
+  Mode-0 path remains the default; existing `:lsp-find-refs`
+  consumers see no behaviour change.
+- **`_cyim_lsp_ex_find_refs(s)`** thinned to a single line:
+  `return _cyim_lsp_ex_find_refs_with_mode(s, 0);` — the body
+  moved to the helper.
+- **Header comment "cyim plugin ABI consumed"** lists the new
+  cyim 1.6.6 surface (`plugin_buf_load_file_split`,
+  `SPLIT_HORIZONTAL` / `SPLIT_VERTICAL`).
+
+### Status
+
+- **`[lib]` bundle source unchanged.** Same 7 modules, same
+  symbols, same protocol code as 1.4.0. distfile regenerated to
+  pick up the v1.5.0 banner; otherwise byte-identical at 2425
+  lines. Same convention as 1.1.0 / 1.2.0 cuts.
+- **Public API freeze (ADR 0001) holds** — no `[lib]` symbol
+  changed shape. The new ex-command names are example-glue
+  state, not part of the bundle's public ABI.
+- **Minimum cyim version**: 1.6.6 for the new ex-commands.
+  Earlier consumers (cyim 1.5.0+ on cyim-lsp 1.4.0 glue)
+  continue to work without change.
+
+### Tests
+
+- `cyrius test` — **7 suites, 210 assertions PASS** (unchanged
+  from 1.4.0; `[lib]` source untouched, example glue isn't in
+  any test harness's include chain).
+- `cyrius fuzz` — 1 PASS.
+- `cyrius lint` — 10 src files + `docs/examples/cyim_glue.cyr`,
+  0 warnings each.
+- `cyrfmt --check` — 10 files clean.
+- `cyrius distlib` — regenerated `dist/cyim-lsp.cyr`, **2425
+  lines** (banner says v1.5.0; byte-identical to 1.4.0
+  otherwise).
+
+### Verification path (cyim 1.6.7 pickup)
+
+When cyim 1.6.7 picks up via `[deps.cyim-lsp].tag = "1.5.0"`
+and updates `src/plugins/lsp_glue.cyr` to mirror this CHANGELOG's
+example-glue changes, three ex-commands are available:
+
+- `:lsp-find-refs` — picker; Enter loads in-place (unchanged).
+- `:lsp-find-refs-split` — picker; Enter splits horizontal,
+  loads in new pane below, focus moves there.
+- `:lsp-find-refs-vsplit` — picker; Enter splits vertical, loads
+  in new pane right, focus moves there.
+
+Keymap suggestions (cyim's `cyim_lsp_init` doesn't bind these
+to `g<letter>` prefixes; users can assign via `:set` or future
+`.cyimrc` keymap surface): `gR` → `:lsp-find-refs-vsplit`,
+keeping the current buffer beside the references; `:gR` →
+`:lsp-find-refs-split` for horizontal.
+
 ## [1.4.0] — 2026-05-09
 
 **`lsp_ref_preview(uri, line, max_chars)` — source-line previews
