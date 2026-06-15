@@ -6,6 +6,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [1.5.1] — 2026-06-15
 
+**Toolchain pin bump cyrius `5.10.20` → `6.2.11`.** Catch-up cut
+mirroring cyim's move to the 6.2.11 pin. Pure pin change — no
+`[lib]` source modifications, no example-glue changes, no protocol
+or behaviour delta. First cut across the 5.x → 6.x boundary; the
+vendored stdlib (`lib/`) was re-synced via `cyrius lib sync` (97
+modules; new 6.x additions — TLS stack, `simd`, `sync`, `bayan`,
+`ganita` — pulled in, none of the listed `[deps].stdlib` modules
+dropped). Cut as a patch (1.5.0 → 1.5.1) because consumers pinning
+cyim-lsp need to know the toolchain expectation moved, but no
+public surface changed. Distfile regenerated under 6.2.11 —
+banner-only delta vs 1.5.0; no symbol changes. All gates green:
+48 + 6 test assertions pass, 7 src files lint-clean (per-file
+iteration), fmt-clean.
+
 ## [1.5.0] — 2026-05-09
 
 **Open-in-split for `:lsp-find-refs` — consumer-side activation
