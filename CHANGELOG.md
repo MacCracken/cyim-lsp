@@ -4,6 +4,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.5.1] — 2026-06-15
+
 ## [1.5.0] — 2026-05-09
 
 **Open-in-split for `:lsp-find-refs` — consumer-side activation
