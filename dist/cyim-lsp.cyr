@@ -283,6 +283,68 @@ fn jsonrpc_parse_frame(buf, len, off_out, len_out) {
 # After fork, parent closes the child's ends; child closes the
 # parent's ends, dup2's its halves to stdin/stdout, then execve.
 
+# =====================================================================
+# Capability gate — the spawn half does not exist on agnos.
+# =====================================================================
+#
+# agnos has no `sys_fork` / `sys_execve` / `sys_dup2` at all. Its frozen
+# process band is run-to-completion only — `execwait#37` (load a static ELF64,
+# block until it exits) and `spawn_path#43` (non-blocking, but with no way to
+# wire the child's stdin/stdout to a pipe). Neither can host the *persistent
+# bidirectional* connection LSP is defined on, and there is no language server
+# to spawn on agnos anyway. `fork` is reserved as syscall #96 and unimplemented
+# (agnos `docs/development/roadmap.md`), so this is not a near-term gap to code
+# around — it is a capability the target does not have.
+#
+# ⛔ THIS GATE IS NOT ONLY ABOUT COMPILING. Three functions here reach the
+# kernel by RAW LINUX SYSCALL NUMBER, and agnos assigns those same numbers to
+# completely different calls — so on agnos they would not fail, they would do
+# something else and look like they worked:
+#
+#     used here      Linux            agnos (syscalls_x86_64_agnos.cyr)
+#     syscall(0,…)   read             SYS_EXIT        — terminates the editor
+#     syscall(2,…)   open             SYS_GETPID      — returns a pid, so the
+#                                                       `fd < 0` guard PASSES
+#     syscall(3,…)   close            SYS_SPAWN       — spawns an in-memory ELF
+#     syscall(72,…)  fcntl            SYS_SHM_WRITE   — writes shared memory
+#
+# `syscall(72, read_fd, 4, flags | 2048)` — a "set O_NONBLOCK" — is
+# `shm_write(id, user_src, size)` on agnos. That is the worst shape available:
+# a silent write through a caller-controlled pointer, from code whose stated
+# intent is to flip a flag. Gating these out of the agnos build is the fix; a
+# runtime `if` would still leave the call sites compiled and one bad branch
+# away from firing. Same class of per-target hazard kriya documents in
+# `src/lib/sys.cyr` ("raw Linux-numbered syscalls are a silent footgun").
+#
+# ⛔ THE ARMS MUST WRAP WHOLE FUNCTION BODIES, NOT SIT INSIDE THEM AS AN EARLY
+# RETURN. `#ifdef CYRIUS_TARGET_AGNOS return 0; #endif` at the top of a function
+# leaves the REST of that function outside the conditional and therefore still
+# compiled — the undefined symbol survives, and only the runtime path changes.
+# Every function below that touches the spawn half is written as a matched
+# `#ifdef` / `#ifndef` PAIR of complete definitions.
+#
+# `LSP_HAVE_SUBPROC` is the consumer-facing flag: 0 means `lsp_proc_spawn` will
+# always refuse, so a consumer can skip registering LSP entirely (cyim does
+# exactly this in `src/plugins/lsp_glue.cyr`) or report "not supported on this
+# system" instead of surfacing a spawn failure as an error.
+
+#ifdef CYRIUS_TARGET_AGNOS
+enum LspSysCap {
+    LSP_HAVE_SUBPROC = 0;   # no fork / execve / dup2; no fcntl
+}
+#endif
+#ifndef CYRIUS_TARGET_AGNOS
+enum LspSysCap {
+    LSP_HAVE_SUBPROC = 1;
+}
+#endif
+
+# Accessor so consumers can branch on the capability without depending on
+# enum visibility through the bundle concatenation.
+fn lsp_have_subproc() {
+    return LSP_HAVE_SUBPROC;
+}
+
 # Read /proc/self/environ and build a NUL-terminated envp array of
 # cstring pointers suitable for execve. Returns 0 on read or alloc
 # failure (caller falls back to empty envp).
@@ -293,6 +355,19 @@ fn jsonrpc_parse_frame(buf, len, off_out, len_out) {
 # trust model (cyim ADR 0001 single-user, not a privilege boundary)
 # env passthrough is fine; argv hygiene (which v1.0.0 already
 # enforces) remains the command-injection defense.
+#
+# agnos arm: there is no `/proc`, and the raw numbers below mean getpid / exit /
+# spawn there (see the capability-gate note above). Answer 0 — the same "no
+# envp" result the Linux arm gives on read/alloc failure — and let the caller
+# take its existing fallback path. Unreachable in practice because
+# `lsp_proc_spawn` refuses first; defined so the agnos build carries no
+# mis-numbered call at all.
+#ifdef CYRIUS_TARGET_AGNOS
+fn _lsp_proc_envp_from_self() {
+    return 0;
+}
+#endif
+#ifndef CYRIUS_TARGET_AGNOS
 fn _lsp_proc_envp_from_self() {
     var fd = syscall(2, "/proc/self/environ", 0, 0);   # SYS_open, O_RDONLY
     if (fd < 0) { return 0; }
@@ -332,6 +407,7 @@ fn _lsp_proc_envp_from_self() {
     store64(envp + slot * 8, 0);   # NULL terminator
     return envp;
 }
+#endif
 
 # Build the argv array for execve. Mirrors process.cyr's `_exec3`
 # but inlined here so we don't need to depend on process.cyr's
@@ -342,6 +418,17 @@ fn _lsp_proc_envp_from_self() {
 # fallback path means /usr/bin/env-based commands won't resolve,
 # but absolute-path commands (lsp_client_start("/abs/path")) still
 # work.
+#
+# agnos arm: `sys_execve` does not exist. Answer -1 so a caller that somehow
+# reached here gets a failure rather than an undefined call. (The Linux arm can
+# never actually return -1: a successful execve does not come back, and a failed
+# one calls sys_exit.)
+#ifdef CYRIUS_TARGET_AGNOS
+fn _lsp_proc_exec(cmd, arg1, arg2) {
+    return 0 - 1;
+}
+#endif
+#ifndef CYRIUS_TARGET_AGNOS
 fn _lsp_proc_exec(cmd, arg1, arg2) {
     var argv[4];
     store64(&argv, cmd);
@@ -365,6 +452,7 @@ fn _lsp_proc_exec(cmd, arg1, arg2) {
     sys_exit(127);
     return 0;
 }
+#endif
 
 # Spawn `cmd` with optional arg1 / arg2 (pass 0 to omit). Sets up
 # bidirectional pipes; returns a 32 B proc handle on success, 0 on
@@ -373,6 +461,24 @@ fn _lsp_proc_exec(cmd, arg1, arg2) {
 # Caller is responsible for calling lsp_proc_close to reap the
 # child and free the pipe fds. Forgetting close leaks fds + leaves
 # a zombie process; always pair spawn with close.
+#
+# ⭐ agnos arm: THIS IS THE ONE THAT MATTERS — it is the single door into the
+# whole spawn half, so refusing here makes every function downstream
+# unreachable with a handle of 0, which they all already treat as "not
+# attached" and answer -1 for. `_lsp_client_start_with` has tested
+# `if (p == 0) { return 0 - 1; }` since v0.3.0, so a consumer that calls
+# `lsp_client_start*` on agnos gets the ordinary "server did not start"
+# failure it already handles — no new error path, no partial state, and no
+# pipe fds leaked (we never open them).
+#
+# Refusing BEFORE `sys_pipe` is deliberate even though agnos does have
+# `pipe#…`: a pipe pair we can never hand to a child is just two leaked fds.
+#ifdef CYRIUS_TARGET_AGNOS
+fn lsp_proc_spawn(cmd, arg1, arg2) {
+    return 0;
+}
+#endif
+#ifndef CYRIUS_TARGET_AGNOS
 fn lsp_proc_spawn(cmd, arg1, arg2) {
     var p_in[16];
     var p_out[16];
@@ -417,6 +523,7 @@ fn lsp_proc_spawn(cmd, arg1, arg2) {
     store64(proc + 24, 0);
     return proc;
 }
+#endif
 
 # Accessors.
 fn lsp_proc_pid(proc) {
@@ -448,14 +555,38 @@ fn lsp_proc_recv(proc, buf, max) {
 # Close the child's pipes and reap the process via sys_waitpid.
 # Idempotent: marks the proc handle's pid = -1 after first call so
 # a second close() returns immediately without re-reaping.
+#
+# The reap is target-branched. The raw `sys_*` wrappers are per-target by design
+# (`lib/syscalls_<arch>_<os>.cyr`) and agnos's `sys_waitpid` is a 1-arg
+# `sys_waitpid(pid)` that returns the child's exit code DIRECTLY, against Linux's
+# 3-arg `sys_waitpid(pid, statusp, options)` that fills a wait-status word. The
+# Linux shape was written unconditionally, which cyrius only WARNED about until
+# v6.5.1 escalated a wrong argument count to a hard error — so `--agnos` builds of
+# this bundle now fail outright, and every consumer that prepends it fails with
+# them (cyim's own agnos build was the report). Same per-target arity class sigil
+# fixed in 3.9.8 (`_sig_unlink`) and sit in 1.3.4 (`sit_mkdir` / `sit_rmdir`).
+#
+# The spawn half (`sys_fork` / `sys_execve` / `sys_dup2`) has no agnos peer at all,
+# so no LSP server can actually be started there — this branch exists so the
+# bundle COMPILES as dead code on agnos, and is correct if a peer ever lands.
 fn lsp_proc_close(proc) {
     if (proc == 0) { return 0 - 1; }
     var pid = load64(proc);
     if (pid < 0) { return 0; }   # already closed
     sys_close(load64(proc + 8));
     sys_close(load64(proc + 16));
-    var status_buf[1];
+    #ifdef CYRIUS_TARGET_AGNOS
+    sys_waitpid(pid);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    # 8 bytes, not 1. A function-local `var X[N]` allocates N BYTES in cyrius
+    # (module-scope is N x u64 — the units differ by scope), and the kernel writes
+    # a 4-byte status word here, so `var status_buf[1]` was a 3-byte stack
+    # overwrite on every reap. Latent before cyrius 6.3.13 moved locals onto the
+    # stack behind a guard page; not worth leaving armed either way.
+    var status_buf[8];
     sys_waitpid(pid, &status_buf, 0);
+    #endif
     store64(proc, 0 - 1);   # mark closed
     return 0;
 }
@@ -483,6 +614,20 @@ fn lsp_proc_kill(proc) {
 # SYS_FCNTL = 72 from syscalls_x86_64_linux.cyr.
 #
 # Returns 0 on success, -1 on fcntl failure.
+#
+# ⛔ agnos arm exists because #72 IS ASSIGNED THERE, not because it is missing.
+# agnos has no fcntl; syscall 72 is `SYS_SHM_WRITE(id, user_src, size)`. The
+# Linux body's `syscall(72, read_fd, 4, flags | 2048)` would therefore be a
+# shared-memory write with `read_fd` as the segment id and the flags word as a
+# length — a silent memory write from a call whose stated job is to set a flag.
+# An undefined function is a loud failure; this would have been a quiet one.
+# Answer -1: `_lsp_initialize` treats a set-nonblock failure as non-fatal.
+#ifdef CYRIUS_TARGET_AGNOS
+fn lsp_proc_set_nonblock(proc) {
+    return 0 - 1;
+}
+#endif
+#ifndef CYRIUS_TARGET_AGNOS
 fn lsp_proc_set_nonblock(proc) {
     if (proc == 0) { return 0 - 1; }
     var pid = load64(proc);
@@ -494,6 +639,7 @@ fn lsp_proc_set_nonblock(proc) {
     if (rc < 0) { return 0 - 1; }
     return 0;
 }
+#endif
 
 # Non-blocking read variant. Like lsp_proc_recv but returns:
 #   > 0  bytes read

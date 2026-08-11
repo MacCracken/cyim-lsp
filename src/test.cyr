@@ -4,7 +4,17 @@
 # return their stub values. Real protocol tests land at v0.2.0+
 # alongside the JSON-RPC implementation.
 
+# Include order mirrors `[lib].modules` in cyrius.cyml — single-pass compiler,
+# so each module may only reference symbols defined earlier. `lsp_client.cyr`
+# calls into BOTH `subprocess.cyr` (lsp_proc_spawn / send / recv / close /
+# set_nonblock) and `lsp_diags.cyr` (lsp_diags_handle_frame), so neither may be
+# omitted: leaving them out was harmless while undefined functions were a
+# warning, and became a hard build failure once cyrius started refusing to emit
+# a binary with reachable undefined functions. Same fix as the one applied to
+# tests/lsp_documents.tcyr.
 include "src/jsonrpc.cyr"
+include "src/subprocess.cyr"
+include "src/lsp_diags.cyr"
 include "src/lsp_client.cyr"
 
 fn _streq(a, b) {

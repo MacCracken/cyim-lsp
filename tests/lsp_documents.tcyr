@@ -10,6 +10,7 @@ include "src/jsonrpc.cyr"
 include "src/subprocess.cyr"
 include "src/lsp_client.cyr"
 include "src/lsp_state.cyr"
+include "src/lsp_diags.cyr"
 include "src/lsp_documents.cyr"
 
 # Compare a NUL-term cstring against an expected literal.

@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "cyim-lsp — LSP client plugin for cyim. Spawns cyrius-lsp as a subprocess, frames JSON-RPC over pipes, and routes diagnostics / didSave / didChange / definition / references through cyim's plugin ABI."
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.2.11"
+cyrius = "6.5.18"
 
 [build]
 entry = "src/main.cyr"
@@ -15,8 +15,30 @@ output = "cyim-lsp"
 #   syscalls/alloc/fmt/io  — required core
 #   string/str/vec         — message buffers, line storage
 #   assert                 — tests/cyim-lsp.tcyr
-#   json                   — JSON-RPC payload parse / build
 #   process                — spawn(cmd, arg1, arg2) for cyrius-lsp subprocess
+#
+# `json` was declared here from v0.2.0 and NEVER CALLED — every LSP payload is
+# scanned by this repo's own hand-written readers (lsp_diags.cyr's
+# `_lsp_diag_parse_int` / `_lsp_diags_find`, lsp_position.cyr's coord parsers),
+# chosen so diagnostics parsing does not allocate a whole document tree per
+# publishDiagnostics. The declaration went stale when cyrius folded `json` into
+# `bayan` (which now re-exports `json_parse` / `json_get` / … as shims), leaving
+# no `lib/json.cyr` in the 6.5.x stdlib. Nothing broke here only because this
+# repo's committed `lib/` still carried a pre-fold `json.cyr` — `lib sync`
+# copies, it does not prune. It surfaced the moment a CONSUMER resolved the
+# `dist/cyim-lsp.deps` sidecar against a correctly-synced stdlib:
+# "dep cyim-lsp requires 'json' but it is not in the cyrius stdlib".
+# Dropped rather than repointed at `bayan` — declaring bayan would fold ~5.4
+# KLOC into every consumer to satisfy a dependency that does not exist.
+#   args                   — NOT used directly. Required on the agnos target
+#                            only: io.cyr's getenv() delegates to
+#                            args_agnos.cyr's _agnos_getenv under
+#                            CYRIUS_TARGET_AGNOS, because agnos has no
+#                            /proc/self/environ and stages envp on the exec
+#                            init stack instead. Declaring io without args
+#                            builds fine on Linux and leaves an undefined
+#                            function on agnos — invisible until this repo
+#                            started building --agnos in CI.
 [deps]
 stdlib = [
     "syscalls",
@@ -26,8 +48,8 @@ stdlib = [
     "string",
     "str",
     "vec",
+    "args",
     "assert",
-    "json",
     "process",
 ]
 

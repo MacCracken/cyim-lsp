@@ -40,6 +40,24 @@ jobs:
           mkdir -p build
           cyrius build src/main.cyr build/${{ github.event.repository.name }}
 
+      - name: Build (agnos target)
+        # THE GATE THAT WAS MISSING. This bundle is prepended verbatim into
+        # consumers that build for agnos (cyim does), so an agnos-invalid call
+        # in `[lib].modules` breaks THEIR build, not ours — and nothing here
+        # ever compiled the agnos arm, so it shipped.
+        #
+        # That is exactly how the 1.5.2 defects reached a consumer: a Linux-
+        # shaped 3-arg `sys_waitpid` (agnos takes 1) sat here warning-only
+        # until cyrius 6.5.1 escalated arity to a hard error, at which point
+        # cyim's `--agnos` build failed on OUR file. Host tests cannot catch
+        # this class — the `#ifdef CYRIUS_TARGET_AGNOS` arms are never
+        # compiled on the host, so a green suite says nothing about them.
+        #
+        # Undefined functions are downgraded to warnings by default when a
+        # call site is unreachable, so a clean OK here is the real assertion:
+        # it means every agnos arm resolves against the agnos syscall surface.
+        run: cyrius build --agnos src/main.cyr build/cyim-lsp-agnos
+
       - name: Test
         # Explicit per-file loop rather than bare `cyrius test`.
         # Bare `cyrius test` auto-discovery proved CI-flaky at

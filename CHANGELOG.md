@@ -4,6 +4,38 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`lsp_proc_close`'s `sys_waitpid` was Linux-shaped unconditionally, breaking every
+  `--agnos` build of the bundle.** The raw `sys_*` wrappers are per-target by design
+  (`lib/syscalls_<arch>_<os>.cyr`) and agnos's `sys_waitpid(pid)` takes **one** argument,
+  returning the child's exit code directly, against Linux's three-argument
+  `sys_waitpid(pid, statusp, options)` that fills a wait-status word. cyrius only warned
+  about the mismatch until **v6.5.1** escalated a wrong argument count to a hard error —
+  at which point this stopped being cosmetic and started failing the build of every
+  consumer that prepends the bundle. Reported from cyim, whose `--agnos` build failed at
+  `lib/cyim-lsp.cyr:459`. Now `#ifdef`-branched per target, the same per-target arity
+  class sigil fixed in 3.9.8 (`_sig_unlink`) and sit in 1.3.4 (`sit_mkdir`/`sit_rmdir`).
+
+  The spawn half (`sys_fork` / `sys_execve` / `sys_dup2`) has no agnos peer at all, so no
+  LSP server can actually start there; the branch exists so the bundle compiles as dead
+  code on agnos, and is correct if a peer ever lands.
+
+- **`var status_buf[1]` was a 3-byte stack overwrite on every reap.** A *function-local*
+  `var X[N]` allocates N **bytes** in cyrius (module-scope is N × u64 — the units differ
+  by scope), and the kernel writes a 4-byte status word into it. Now `var status_buf[8]`,
+  matching the stdlib's own `wait_pid`. Latent before cyrius 6.3.13 moved locals onto the
+  stack behind a guard page.
+
+- **`tests/lsp_documents.tcyr` no longer compiles standalone.** It includes
+  `src/lsp_client.cyr`, which calls into `lsp_diags`, but was the only test of the three
+  that did not also include `src/lsp_diags.cyr`. Harmless while undefined functions were
+  a warning; current cyrius refuses to emit a binary with reachable undefined functions.
+  Added the include, matching `lsp_position.tcyr` and `lsp_diags.tcyr`. Suite **48
+  passed, 0 failed** (was 5 of 6 files, one failing to compile).
+
+- `dist/cyim-lsp.cyr` regenerated (2449 lines) so the bundle carries the above.
+
 ## [1.5.1] — 2026-06-15
 
 **Toolchain pin bump cyrius `5.10.20` → `6.2.11`.** Catch-up cut

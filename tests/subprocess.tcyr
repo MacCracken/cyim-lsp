@@ -32,6 +32,16 @@ fn _byte_eq(a, b, n) {
 fn main() {
     alloc_init();
 
+    # The capability flag itself. This asserts the HOST arm only — a host run
+    # never compiles the `#ifdef CYRIUS_TARGET_AGNOS` side, so there is no way
+    # to assert the agnos value from here and pretending otherwise would be a
+    # vacuous test. The agnos arm's gate is `cyrius build --agnos` in CI.
+    # What this DOES catch is the arms being swapped, or the Linux arm being
+    # lost entirely to a mispaired #ifdef — either of which would silently
+    # disable LSP on every platform that supports it.
+    test_group("LSP_HAVE_SUBPROC is 1 on a fork/exec-capable host");
+    assert_eq(lsp_have_subproc(), 1, "subproc capability present on host");
+
     test_group("lsp_proc_spawn /bin/cat returns a non-null handle");
     var p = lsp_proc_spawn("/bin/cat", 0, 0);
     assert_neq(p, 0, "spawn handle non-null");

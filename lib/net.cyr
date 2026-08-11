@@ -7,12 +7,12 @@
 # Requires: agnosys/syscalls.cyr, alloc.cyr, tagged.cyr
 
 # Syscall numbers
-var SYS_SOCKET = 41;
-var SYS_CONNECT = 42;
+var NSYS_SOCKET = 41;
+var NSYS_CONNECT = 42;
 var SYS_ACCEPT = 43;
-var SYS_BIND = 49;
-var SYS_LISTEN = 50;
-var SYS_SETSOCKOPT = 54;
+var NSYS_BIND = 49;
+var NSYS_LISTEN = 50;
+var NSYS_SETSOCKOPT = 54;
 var SYS_SHUTDOWN = 48;
 
 # Socket constants. AF_INET / SOCK_* are the same on Linux and Darwin; the
@@ -136,10 +136,12 @@ fn INADDR_LOOPBACK(): i64 { return 0x0100007F; }
 # model — sock_connect(#47) does both and yields a small conn_id (0..7),
 # carried as a TAGGED fd by the syscall peer so this file's send/recv/close
 # (which bottom out at sys_write/sys_read/sys_close) stay source-identical;
-# the peer routes tagged fds to #48/#49/#50. Only tcp_socket + sock_connect
-# need an agnos body. Server-side (bind/listen/accept) belongs to AGNOS
-# Phase B (inbound TCP), a separate concern from this client peer; those
-# keep their POSIX bodies and simply aren't reachable on the client path.
+# the peer routes tagged fds to #48/#49/#50. tcp_socket + sock_connect drive
+# the CLIENT path; the SERVER path (sock_bind/listen/accept) wires onto the
+# kernel sock_listen#56 / sock_accept#57 band (agnos 1.45.5/.6) via the
+# listen↔fd adapter in the syscall peer (v6.2.22) — bind stashes the port,
+# listen issues #56, accept issues #57 + wraps the accepted conn_id as a fresh
+# tagged fd that rides the same #48/#49/#50 path.
 #
 # Byte-swap a 32-bit value: net.cyr's `addr` is network-byte-order packed
 # (sockaddr sin_addr; INADDR_LOOPBACK = 0x0100007F), but AGNOS #47 wants the
@@ -152,7 +154,27 @@ fn _agnos_bswap32(x): i64 {
     var b3 = (x >> 24) & 0xFF;
     return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
 }
+
 #endif
+
+# v6.2.22: sock_accept returns Err(_NET_EAGAIN) when a non-blocking accept finds no
+# connection pending, matching a Linux non-blocking accept's -EAGAIN (11) so a
+# server's accept poll-loop stays source-identical across targets. v6.4.61: moved
+# out of the AGNOS #ifdef — the Linux/macho path uses it too (the would-block singleton).
+var _NET_EAGAIN = 11;
+
+# v6.4.61: shared would-block Result singleton. sock_accept's overwhelmingly common
+# return in a non-blocking server is "nothing pending" (Err(_NET_EAGAIN)); on the
+# no-free bump allocator, boxing a fresh 16-byte Result every poll leaks the arena
+# and eventually NULL-faults a long-running accept-poll daemon (mishrand/agora/
+# descent/setu — issue 2026-07-12-net-sock-accept-per-poll-alloc-leak). Box it ONCE,
+# lazily, and hand back the same pointer each poll → zero steady-state allocation.
+# Safe: callers only READ the tag + code (is_ok / result_unwrap) and never mutate it.
+var _net_eagain_box = 0;
+fn _net_eagain() : Result {
+    if (_net_eagain_box == 0) { _net_eagain_box = Err(_NET_EAGAIN); }
+    return _net_eagain_box;
+}
 
 # Create a TCP socket. Returns Result(fd). On AGNOS the "fd" is a tagged
 # placeholder handle (a reserved conn slot); the real conn_id is assigned by
@@ -164,7 +186,7 @@ fn tcp_socket() : Result {
     return Ok(afd);
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    var fd = syscall(SYS_SOCKET, AF_INET, SOCK_STREAM, 0);
+    var fd = syscall(NSYS_SOCKET, AF_INET, SOCK_STREAM, 0);
     if (fd < 0) { return Err(0 - fd); }
     return Ok(fd);
     #endif
@@ -180,7 +202,7 @@ fn udp_socket() : Result {
     return Err(1);   # use sys_udp_bind/send/recv/unbind (#51-#54) on agnos
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    var fd = syscall(SYS_SOCKET, AF_INET, SOCK_DGRAM, 0);
+    var fd = syscall(NSYS_SOCKET, AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) { return Err(0 - fd); }
     return Ok(fd);
     #endif
@@ -189,7 +211,7 @@ fn udp_socket() : Result {
 # Set socket option SO_REUSEADDR
 fn sock_reuse(fd): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
-    # AGNOS has no setsockopt — Linux SYS_SETSOCKOPT=54 collides with agnos
+    # AGNOS has no setsockopt — Linux NSYS_SETSOCKOPT=54 collides with agnos
     # #54=SYS_UDP_UNBIND (silent mis-dispatch). Server-side reuse is AGNOS
     # Phase B (inbound TCP), unreached on the client path; no-op success. v6.2.7.
     return 0;
@@ -197,7 +219,7 @@ fn sock_reuse(fd): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     var val = alloc(4);
     store32(val, 1);
-    return syscall(SYS_SETSOCKOPT, fd, SOL_SOCKET, SO_REUSEADDR, val, 4);
+    return syscall(NSYS_SETSOCKOPT, fd, SOL_SOCKET, SO_REUSEADDR, val, 4);
     #endif
 }
 
@@ -208,7 +230,7 @@ fn sock_reuse(fd): i64 {
 # (see CHANGELOG [5.11.13]).
 fn sock_set_recv_timeout(fd, secs, usecs): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
-    # AGNOS has no SO_RCVTIMEO (and SYS_SETSOCKOPT=54 mis-dispatches to agnos
+    # AGNOS has no SO_RCVTIMEO (and NSYS_SETSOCKOPT=54 mis-dispatches to agnos
     # #54=SYS_UDP_UNBIND). The recv deadline is enforced by the syscall peer's
     # _agnos_sock_recv_block poll instead; no-op here. v6.2.7.
     return 0;
@@ -227,7 +249,7 @@ fn sock_set_recv_timeout(fd, secs, usecs): i64 {
     #else
     store64(tv + 8, usecs);
     #endif
-    return syscall(SYS_SETSOCKOPT, fd, SOL_SOCKET, SO_RCVTIMEO, tv, 16);
+    return syscall(NSYS_SETSOCKOPT, fd, SOL_SOCKET, SO_RCVTIMEO, tv, 16);
     #endif
 }
 
@@ -239,7 +261,7 @@ fn sock_set_recv_timeout(fd, secs, usecs): i64 {
 # worker inside write(). Same struct timeval layout / per-target dispatch.
 fn sock_set_send_timeout(fd, secs, usecs): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
-    # AGNOS has no SO_SNDTIMEO (SYS_SETSOCKOPT=54 mis-dispatches). The send
+    # AGNOS has no SO_SNDTIMEO (NSYS_SETSOCKOPT=54 mis-dispatches). The send
     # deadline is enforced by the syscall peer's poll path; no-op here. v6.2.7.
     return 0;
     #endif
@@ -252,21 +274,26 @@ fn sock_set_send_timeout(fd, secs, usecs): i64 {
     #else
     store64(tv + 8, usecs);
     #endif
-    return syscall(SYS_SETSOCKOPT, fd, SOL_SOCKET, SO_SNDTIMEO, tv, 16);
+    return syscall(NSYS_SETSOCKOPT, fd, SOL_SOCKET, SO_SNDTIMEO, tv, 16);
     #endif
 }
 
-# Bind socket to address:port. Returns Result(0). Server-side (bind/listen/
-# accept) is AGNOS Phase B (inbound TCP) — the ring-3 listen/accept surface
-# isn't exposed yet — so these fail loud on agnos rather than emit invalid
-# BSD syscalls. See proposal 2026-06-14-agnos-net-entropy-clock-syscalls.md.
+# Bind socket to address:port. Returns Result(0). On AGNOS the server path
+# (bind/listen/accept) wires onto the kernel sock_listen#56 / sock_accept#57
+# band (agnos 1.45.5/.6) via the listen↔fd adapter in the syscall peer: bind
+# stashes the port, sock_listen issues #56, sock_accept issues #57 + wraps the
+# accepted conn_id. See 2026-06-18-agnos-server-socket-peer.md.
 fn sock_bind(fd, addr, port) : Result {
     #ifdef CYRIUS_TARGET_AGNOS
-    return Err(1);   # AGNOS Phase B (inbound TCP) — not exposed to ring 3 yet
+    # AGNOS merges bind+listen into sock_listen(#56); bind just stashes the port
+    # for sock_listen to issue with. addr is ignored — the kernel binds the
+    # single NIC, ip is unused. v6.2.22.
+    _agnos_listen_stash_port(fd, port);
+    return Ok(0);
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
     var sa = sockaddr_in(addr, port);
-    var r = syscall(SYS_BIND, fd, sa, 16);
+    var r = syscall(NSYS_BIND, fd, sa, 16);
     if (r < 0) { return Err(0 - r); }
     return Ok(0);
     #endif
@@ -275,10 +302,15 @@ fn sock_bind(fd, addr, port) : Result {
 # Listen on socket. Returns Result(0). AGNOS Phase B — see sock_bind.
 fn sock_listen(fd, backlog) : Result {
     #ifdef CYRIUS_TARGET_AGNOS
-    return Err(1);
+    # Issue sock_listen(#56) on the port stashed by sock_bind (the kernel merges
+    # bind+listen → a listen_id, stored in the fd's adapter slot). backlog is
+    # advisory on AGNOS — the kernel's 8-conn-slot table caps it. v6.2.22.
+    var r = _agnos_listen_start(fd);
+    if (r < 0) { return Err(1); }   # port in use / kernel conn table full
+    return Ok(0);
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    var r = syscall(SYS_LISTEN, fd, backlog);
+    var r = syscall(NSYS_LISTEN, fd, backlog);
     if (r < 0) { return Err(0 - r); }
     return Ok(0);
     #endif
@@ -287,14 +319,42 @@ fn sock_listen(fd, backlog) : Result {
 # Accept a connection. Returns Result(client_fd). AGNOS Phase B — see sock_bind.
 fn sock_accept(fd) : Result {
     #ifdef CYRIUS_TARGET_AGNOS
-    return Err(1);
+    # AGNOS sock_accept(#57) is NON-BLOCKING: it drives net_poll (advancing the
+    # inbound SYN→ESTABLISHED handshake) then tcp_accept, returning the next
+    # established conn_id or -1 (none pending). Map the listen fd → listen_id,
+    # issue #57; on -1 return Err(_NET_EAGAIN) so the server poll-loops (matches
+    # a Linux non-blocking accept). On success wrap the conn_id in a FRESH tagged
+    # fd via the client-band adapter — the accepted conn then transparently uses
+    # sock_send#48 / sock_recv#49 / sock_close#50. v6.2.22.
+    var lid = _agnos_fd_listen(fd);
+    if (lid < 0) { return Err(1); }              # fd isn't a LISTEN socket
+    var cid = sys_sock_accept(lid);
+    if (cid < 0) { return _net_eagain(); }        # none pending — WOULD_BLOCK (singleton, v6.4.61)
+    var cfd = _agnos_sock_open();
+    if (cfd < 0) {
+        # #57 COMMITS the accept kernel-side (the conn is ESTABLISHED + marked
+        # accepted, never re-handed-out). If our 8-slot fd table is full we must
+        # reap that conn (#50) or it leaks one of the kernel's 8 conn slots
+        # forever — over a server's life that exhausts the kernel table. v6.2.22.
+        sys_sock_close(cid);
+        return Err(1);
+    }
+    _agnos_sock_bind(cfd, cid);
+    return Ok(cfd);
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    var client_addr = alloc(16);
-    var addrlen = alloc(4);
-    store32(addrlen, 16);
-    var cfd = syscall(SYS_ACCEPT, fd, client_addr, addrlen);
-    if (cfd < 0) { return Err(0 - cfd); }
+    # v6.4.61 (Fix A): accept(NULL, NULL) — the peer address (client_addr/addrlen)
+    # was written but NEVER read (sock_accept returns only Ok(cfd)), so allocating
+    # it was 20 B/call of pure bump-heap leak. accept(2) accepts NULL/NULL. A future
+    # caller needing the peer addr should add sock_accept_from(fd, out) instead.
+    var cfd = syscall(SYS_ACCEPT, fd, 0, 0);
+    if (cfd < 0) {
+        # v6.4.61 (Fix B): the would-block (-EAGAIN) return is the poll-loop's steady
+        # state — hand back the shared singleton instead of boxing a fresh Result
+        # each poll. A real error (rare) still boxes its own Err.
+        if ((0 - cfd) == _NET_EAGAIN) { return _net_eagain(); }
+        return Err(0 - cfd);
+    }
     return Ok(cfd);
     #endif
 }
@@ -314,7 +374,7 @@ fn sock_connect(fd, addr, port) : Result {
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
     var sa = sockaddr_in(addr, port);
-    var r = syscall(SYS_CONNECT, fd, sa, 16);
+    var r = syscall(NSYS_CONNECT, fd, sa, 16);
     if (r < 0) { return Err(0 - r); }
     return Ok(0);
     #endif
@@ -372,7 +432,7 @@ fn sock_reuseport(fd): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     var optval[4];
     store32(&optval, 1);
-    return syscall(SYS_SETSOCKOPT, fd, SOL_SOCKET, SO_REUSEPORT, &optval, 4);
+    return syscall(NSYS_SETSOCKOPT, fd, SOL_SOCKET, SO_REUSEPORT, &optval, 4);
     #endif
 }
 
@@ -387,7 +447,7 @@ fn net_join_multicast(fd, group, iface): i64 {
     var mreq[8];
     store32(&mreq, group);
     store32(&mreq + 4, iface);
-    return syscall(SYS_SETSOCKOPT, fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, 8);
+    return syscall(NSYS_SETSOCKOPT, fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, 8);
     #endif
 }
 
@@ -400,7 +460,7 @@ fn net_drop_multicast(fd, group, iface): i64 {
     var mreq[8];
     store32(&mreq, group);
     store32(&mreq + 4, iface);
-    return syscall(SYS_SETSOCKOPT, fd, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq, 8);
+    return syscall(NSYS_SETSOCKOPT, fd, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq, 8);
     #endif
 }
 
@@ -413,7 +473,7 @@ fn net_set_multicast_ttl(fd, ttl): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     var optval[4];
     store32(&optval, ttl);
-    return syscall(SYS_SETSOCKOPT, fd, IPPROTO_IP, IP_MULTICAST_TTL, &optval, 4);
+    return syscall(NSYS_SETSOCKOPT, fd, IPPROTO_IP, IP_MULTICAST_TTL, &optval, 4);
     #endif
 }
 
@@ -425,7 +485,7 @@ fn net_set_multicast_loop(fd, on): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     var optval[4];
     store32(&optval, on);
-    return syscall(SYS_SETSOCKOPT, fd, IPPROTO_IP, IP_MULTICAST_LOOP, &optval, 4);
+    return syscall(NSYS_SETSOCKOPT, fd, IPPROTO_IP, IP_MULTICAST_LOOP, &optval, 4);
     #endif
 }
 
@@ -438,7 +498,7 @@ fn net_set_multicast_if(fd, iface): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     var optval[4];
     store32(&optval, iface);
-    return syscall(SYS_SETSOCKOPT, fd, IPPROTO_IP, IP_MULTICAST_IF, &optval, 4);
+    return syscall(NSYS_SETSOCKOPT, fd, IPPROTO_IP, IP_MULTICAST_IF, &optval, 4);
     #endif
 }
 
@@ -553,14 +613,14 @@ fn net_connect_sa_nb(fd, sa, salen, timeout_ms): i64 {
     if (cr == 0) {
         result = _NET_CONN_NB_OK;                           # immediate (localhost)
     } else { if (cr == 0 - _NET_EINPROGRESS) {
-            var pfd[1];
+            var pfd[8];
             store32(&pfd,     fd);
             store16(&pfd + 4, 4);                           # POLLOUT
             store16(&pfd + 6, 0);                           # revents
             var pr = syscall(7, &pfd, 1, timeout_ms);       # poll
             if (pr > 0) {
-                var sb[1];
-                var slen[1];
+                var sb[4];
+                var slen[4];
                 store32(&sb,   0);
                 store32(&slen, 4);
                 syscall(55, fd, SOL_SOCKET, SO_ERROR, &sb, &slen);  # getsockopt SO_ERROR
