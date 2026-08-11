@@ -4,7 +4,67 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.5.2] — 2026-08-11
+
+**Toolchain pin bump cyrius `6.2.11` → `6.5.18`, and the agnos capability gate
+that pin exposed.** cyim's `--agnos` build was failing inside *this* repo's
+bundle; the whole cut is that failure and everything found underneath it.
+
 ### Fixed
+
+- **The spawn half is now gated out of the agnos build, not merely left
+  unreachable.** `lsp_proc_spawn` / `_lsp_proc_exec` / `_lsp_proc_envp_from_self` /
+  `lsp_proc_set_nonblock` are each written as a matched `#ifdef` / `#ifndef
+  CYRIUS_TARGET_AGNOS` pair of **complete definitions**, so the agnos build
+  references `sys_fork` / `sys_execve` / `sys_dup2` nowhere at all. Previously
+  those three were emitted unconditionally and survived only because no consumer
+  address-took an LSP handler on agnos — a warn-only "undefined function" that
+  becomes a hard error the moment one does.
+
+  ⛔ The arms wrap whole function bodies deliberately. An `#ifdef … return 0;
+  #endif` early return leaves the *rest* of the function outside the conditional
+  and therefore still compiled: the undefined symbol survives and only the
+  runtime path changes.
+
+- **Three functions here reached the kernel by raw Linux syscall number, and
+  agnos assigns those numbers to different calls.** This was the more serious
+  half of the gate — not a build error, but a silent misdirection:
+
+  | call site | Linux | agnos |
+  |---|---|---|
+  | `syscall(0, …)` | `read` | `SYS_EXIT` — terminates the editor |
+  | `syscall(2, …)` | `open` | `SYS_GETPID` — returns a pid, so the `fd < 0` guard **passes** |
+  | `syscall(3, …)` | `close` | `SYS_SPAWN` — spawns an in-memory ELF |
+  | `syscall(72, …)` | `fcntl` | `SYS_SHM_WRITE` — writes shared memory |
+
+  `lsp_proc_set_nonblock`'s `syscall(72, read_fd, 4, flags | 2048)` — nominally
+  "set O_NONBLOCK" — is `shm_write(id, user_src, size)` on agnos: a write through
+  a caller-controlled pointer from a call whose stated job is to flip a flag. An
+  undefined function is a loud failure; this would have been a quiet one.
+
+- **`json` was declared in `[deps].stdlib` since v0.2.0 and never called.** Every
+  LSP payload is scanned by this repo's own readers (`_lsp_diag_parse_int`,
+  `_lsp_diags_find`, lsp_position's coord parsers), chosen so diagnostics parsing
+  does not allocate a document tree per `publishDiagnostics`. The declaration went
+  stale when cyrius folded `json` into `bayan`, leaving no `lib/json.cyr` in the
+  6.5.x stdlib — and nothing broke here only because this repo's committed `lib/`
+  still carried a **pre-fold `json.cyr`** (`lib sync` copies, it does not prune).
+  It surfaced the instant a consumer resolved the new `dist/cyim-lsp.deps` sidecar
+  against a correctly-synced stdlib: *"dep cyim-lsp requires 'json' but it is not
+  in the cyrius stdlib"*. Dropped rather than repointed at `bayan` — repointing
+  would fold ~5.4 KLOC into every consumer to satisfy a dependency that does not
+  exist. Stale `lib/json.cyr` deleted.
+
+- **`args` added to `[deps].stdlib` — required on agnos only.** `io.cyr`'s
+  `getenv()` delegates to `args_agnos.cyr`'s `_agnos_getenv` under
+  `CYRIUS_TARGET_AGNOS`, because agnos has no `/proc/self/environ` and stages envp
+  on the exec init stack instead. Declaring `io` without `args` builds clean on
+  Linux and leaves an undefined function on agnos.
+
+- **`src/test.cyr` did not compile.** It includes `src/lsp_client.cyr`, which calls
+  into both `subprocess.cyr` and `lsp_diags.cyr`, but included neither — the same
+  defect as the `tests/lsp_documents.tcyr` entry below, in the `[build].test` entry
+  CI actually runs. Includes added in `[lib].modules` order.
 
 - **`lsp_proc_close`'s `sys_waitpid` was Linux-shaped unconditionally, breaking every
   `--agnos` build of the bundle.** The raw `sys_*` wrappers are per-target by design
@@ -34,7 +94,49 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Added the include, matching `lsp_position.tcyr` and `lsp_diags.tcyr`. Suite **48
   passed, 0 failed** (was 5 of 6 files, one failing to compile).
 
-- `dist/cyim-lsp.cyr` regenerated (2449 lines) so the bundle carries the above.
+- `dist/cyim-lsp.cyr` regenerated (2571 lines, was 2425 at 1.5.0) so the bundle
+  carries the above, along with `dist/cyim-lsp.deps` (10 stdlib leaves — `json`
+  out, `args` in).
+
+### Added
+
+- **`LSP_HAVE_SUBPROC` capability flag + `lsp_have_subproc()` accessor** — 0 on
+  agnos, 1 elsewhere, mirroring kriya's `K_HAVE_*` pattern in `src/lib/sys.cyr`.
+  Lets a consumer skip registering LSP entirely, or report "not supported on this
+  system", instead of surfacing a spawn refusal as an error. On agnos
+  `lsp_proc_spawn` answers 0, which `_lsp_client_start_with` has tested since
+  v0.3.0 (`if (p == 0) { return 0 - 1; }`), so `lsp_client_start*` degrades to the
+  ordinary "server did not start" path every consumer already handles — no new
+  error path, no partial state, and no pipe fds leaked (we never open them).
+
+- **CI now builds the `--agnos` target.** This is the gate whose absence let the
+  break ship: the bundle is prepended verbatim into consumers that build for
+  agnos, so an agnos-invalid call in `[lib].modules` breaks *their* build, not
+  ours, and nothing here ever compiled the agnos arm. Host tests structurally
+  cannot catch this class — the `#ifdef CYRIUS_TARGET_AGNOS` arms are never
+  compiled on the host, so a green suite says nothing about them.
+
+- `tests/subprocess.tcyr` asserts `lsp_have_subproc() == 1` on the host. Scoped
+  honestly: a host run cannot assert the agnos value, and pretending otherwise
+  would be a vacuous test. What it catches is the arms being swapped or the Linux
+  arm being lost to a mispaired `#ifdef`.
+
+### Changed
+
+- **Toolchain pin `6.2.11` → `6.5.18`** (current cyrius release), vendored `lib/`
+  re-synced via `cyrius lib sync --full` (107 modules). The stale pin is the root
+  cause the arity error stayed invisible in this repo: cyrius **6.5.1** made a
+  wrong argument count a hard error, but CI was still installing 6.2.11, so the
+  break could only ever be discovered by a consumer.
+
+### Verification
+
+Suite **208 passed, 0 failed** across 7 files (was 204 in 6 files, with
+`src/test.cyr` failing to compile): cyim-lsp 2, jsonrpc 24, lsp_diags 47,
+lsp_documents 48, lsp_position 68, subprocess 16, `src/test.cyr` 3. Both
+`cyrius build` and `cyrius build --agnos` complete with **zero warnings**.
+Consumer check: cyim's `cyrius build --agnos src/main.cyr` — the failure that
+opened this cut — now succeeds clean.
 
 ## [1.5.1] — 2026-06-15
 
