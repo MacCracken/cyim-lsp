@@ -4,6 +4,86 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.5.3] — 2026-08-23
+
+**LSP starts. `var argv[4]` was sized in pointer slots, not bytes — and that
+one character is why `lsp_client_start_default()` has answered -1 for every
+consumer since v0.2.0.**
+
+cyim's `tests/smcyr/lsp_fold.smcyr` goes from **4 passed / 9 failed** to
+**13 passed / 0 failed** against a real `cyrius-lsp`.
+
+### Fixed
+
+- **`_lsp_proc_exec` overran its argv array on every spawn** (`src/subprocess.cyr`).
+
+  In Cyrius, `var buf[N]` reserves **N bytes**. The array holds four 64-bit
+  pointers — `cmd`, `arg1`, `arg2`, `NULL` — so it needs `4 * 8 = 32`. It said
+  `var argv[4]`: **four bytes**, taking up to 32 bytes of pointer writes.
+  `var fallback[1]` eleven lines down was the same mistake, one byte for an
+  8-byte NULL slot.
+
+  `lsp_client_start_default()` passes `("/usr/bin/env", "cyrius-lsp", 0)`, so
+  `ai` reaches 2 and the writes span `[0, 24)` — six times the declared size.
+  The adjacent stack was clobbered, `execve` received a malformed vector, it
+  failed, and the child fell through to its own `sys_exit(127)`.
+
+  **The symptom was silence.** Consumers saw `lsp_client_start_default()`
+  return -1 and `lsp_client_describe()` report `"(not attached)"`, with
+  nothing on stderr — because `execve` never took, so `env` was never there to
+  complain that it couldn't find `cyrius-lsp`. Every plausible cause pointed
+  elsewhere: the server was fine, it answered a hand-fed `initialize` with a
+  well-formed 374-byte frame, and its startup banner went to stderr rather
+  than polluting the protocol stream.
+
+  Proven by A/B in a single process: the bundle's `lsp_proc_spawn` and a local
+  copy of the same function differing **only** in `argv[4]` vs `argv[32]`, run
+  against the same arguments — the local copy gets a 397-byte `initialize`
+  response, the bundle gets EOF.
+
+  Sized correctly, with the arithmetic written down beside the declaration.
+
+### Why the test suite did not catch it
+
+`tests/subprocess.tcyr` spawned `/bin/cat` with `arg1 = arg2 = 0`. That leaves
+`ai` at 1, so only 16 bytes are written — a smaller overrun that happened not
+to break that particular exec, and the pipe round-trip passed cleanly in CI
+for eight releases.
+
+**The bug needs an actual argument to bite**, and no test passed one. Verified
+in the same A/B run: the bundle spawning an absolute path with no args works
+fine; the same bundle spawning `/usr/bin/env cyrius-lsp` dies.
+
+### Added
+
+- **`tests/subprocess.tcyr` — spawn WITH arguments** (24 assertions, was 16).
+  Two new groups using `/usr/bin/env cat` as the mock: the same stdin→stdout
+  pass-through as `/bin/cat`, reached through an argv that actually carries
+  arguments. One-argument and two-argument forms, the second driving `ai` to 2
+  and the NULL terminator to offset 24 — the deepest write the builder makes,
+  and the exact shape `lsp_client_start_default` performs.
+
+  Mutation-tested: restoring `argv[4]` / `fallback[1]` fails 4 of them, with
+  `recv` returning 0 (EOF — the child died on exec) rather than the echo.
+
+### The shape, for whoever hits it next
+
+This is the **third** slot-vs-byte bug found in this ecosystem, and the second
+in this file:
+
+- `lsp_proc_close`'s `var status_buf[1]` — a 4-byte kernel status word, fixed
+  at **v1.5.2**. Its fix comment sits ~150 lines below `_lsp_proc_exec` and
+  names the exact mechanism: *"latent before cyrius 6.3.13 moved locals onto
+  the stack behind a guard page."* **That sweep caught the reap buffer and
+  missed the exec buffer.**
+- `argv[4]` / `fallback[1]` — this cut.
+- cyim's own `_cmd_ls_put_int` scratch, found by cyim's 1.8.3 audit looking
+  for the *shape* rather than the symptom.
+
+If you are adding a `var buf[N]` that will hold pointers, N is
+`slots * 8`. Grepping for `var [a-z_]*\[[1-7]\]` finds the whole class in a
+second.
+
 ## [1.5.2] — 2026-08-11
 
 **Toolchain pin bump cyrius `6.2.11` → `6.5.18`, and the agnos capability gate

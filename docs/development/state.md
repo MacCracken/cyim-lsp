@@ -5,6 +5,40 @@
 
 ## Version
 
+**1.5.3** — **LSP starts.** Shipped 2026-08-23. `_lsp_proc_exec` declared
+`var argv[4]` — **four bytes** for four 64-bit pointers, so every spawn
+overran it and `lsp_client_start_default()` has answered -1 for every
+consumer since v0.2.0. `var fallback[1]` was the same mistake. Sized to
+`argv[32]` / `fallback[8]`.
+
+The symptom was silence: `execve` got a clobbered vector, failed, and the
+child fell through to `sys_exit(127)` — so nothing reached stderr, because
+`env` was never there to complain it couldn't find `cyrius-lsp`. Every
+plausible cause pointed elsewhere (the server answers a hand-fed `initialize`
+fine; its banner goes to stderr, not the protocol stream).
+
+**cyim's `tests/smcyr/lsp_fold.smcyr`: 4 passed / 9 failed → 13 passed / 0
+failed** against a real `cyrius-lsp` — cyim's BUG-002, closed. cyim picks this
+up with a `[deps.cyim-lsp].tag` bump and **no source change of its own**.
+
+Why eight releases of CI missed it: `tests/subprocess.tcyr` only ever spawned
+`/bin/cat` with `arg1 = arg2 = 0`, which writes 16 bytes rather than 32 — a
+smaller overrun that happened not to break that exec. **The bug needs a real
+argument to bite.** The suite now spawns `/usr/bin/env cat` with one and two
+arguments (24 assertions, was 16); restoring `argv[4]` fails 4 of them.
+
+Third slot-vs-byte bug in this ecosystem and the **second in this file** —
+`lsp_proc_close`'s `var status_buf[1]` was fixed at 1.5.2, and that sweep
+missed the exec buffer 150 lines above it.
+
+**1.5.2** — Toolchain pin bump cyrius `6.2.11` → `6.5.18` + the agnos
+capability gate it exposed. Shipped 2026-08-11. The spawn half is compiled out
+of the agnos build behind matched `#ifdef`/`#ifndef` arms rather than left
+unreachable; three functions that reached the kernel by raw Linux syscall
+number are branched per target (agnos assigns 0/2/3/72 to different calls);
+`json` dropped from stdlib leaves, `args` added. Fixed `lsp_proc_close`'s
+`var status_buf[1]` — a 4-byte kernel status word in a 1-byte slot.
+
 **1.5.1** — Toolchain pin bump cyrius `5.10.20` → `6.2.11` shipped 2026-06-15. Pure pin change mirroring cyim's 6.2.11 move — no `[lib]` source, glue, or protocol delta. First cut across the 5.x → 6.x boundary; `lib/` re-synced via `cyrius lib sync` (97 modules). Cut as a patch (no public surface change). Distfile regenerated under 6.2.11 (2425 lines, banner-only delta). Gates green: 48 + 6 assertions pass, 7 src files lint/fmt-clean.
 
 **1.5.0** — Open-in-split for `:lsp-find-refs` shipped 2026-05-09. Consumer-side activation against cyim 1.6.6's `plugin_buf_load_file_split` ABI. Two new ex-commands: `:lsp-find-refs-split` (horizontal) and `:lsp-find-refs-vsplit` (vertical) — both share the existing find/parse/display flow via a new `_cyim_lsp_ex_find_refs_with_mode(s, mode)` helper that sets a module-level `_cyim_lsp_ref_split_mode` global. The single `_cyim_lsp_on_ref_select` callback branches on the mode at jump time, routing to `plugin_buf_load_file` (mode 0; existing behaviour preserved byte-for-byte) or `plugin_buf_load_file_split(..., SPLIT_HORIZONTAL/SPLIT_VERTICAL)` (modes 1/2). `[lib]` bundle source **unchanged from 1.4.0** — banner-only distfile delta (2425 lines, byte-identical otherwise). Same convention as 1.1.0/1.2.0 example-glue activations. Cut as a minor so consumers can track the new ex-command surface via the version delta. Minimum cyim version for the new glue: 1.6.6. Public API freeze (ADR 0001) holds — no [lib] symbol changed shape. Closes the long-deferred "open-in-split" carry-over from cyim's 1.5.x polish list — cyim 1.6.7 picks up.
@@ -172,20 +206,24 @@ consumers as code — copied verbatim into the consumer's tree):**
 - `src/test.cyr` (`[build].test`) — 3 assertions (smoke) PASS
 - `tests/cyim-lsp.tcyr` — 2 assertions (scaffold smoke) PASS
 - `tests/jsonrpc.tcyr` — 24 assertions (framing + F-1) PASS
-- `tests/subprocess.tcyr` — 15 assertions (/bin/cat round-trip) PASS
+- `tests/subprocess.tcyr` — **24 assertions** PASS (/bin/cat round-trip, plus
+  the v1.5.3 spawn-WITH-ARGUMENTS regression via `/usr/bin/env cat` — the
+  shape no test covered for eight releases, and the one the argv bug needed)
 - `tests/lsp_diags.tcyr` — 47 assertions (counts + tuples + F-2) PASS
-- `tests/lsp_position.tcyr` — 38 assertions (positions + Location parser) PASS
+- `tests/lsp_position.tcyr` — 68 assertions (positions + Location parser + previews) PASS
 - `tests/lsp_documents.tcyr` — 48 assertions (escape, builders, content_to_json,
   state, lsp_streq) PASS — was 39 at v1.0.1; v1.0.2 added
   `lsp_content_to_json_string`, `_lsp_nav_build_params`,
   `lsp_streq` coverage.
-- `cyrius test` — **174 assertions all PASS** (was 171 at v1.0.1).
+- `cyrius tests` — **213 assertions all PASS** across 6 suites (was 174 at v1.0.2; +9 at v1.5.3 for the spawn-with-arguments regression).
 - `fuzz/jsonrpc.fcyr` — random byte feeder; 5000 buffers PASS.
-- `cyrius lint src/*.cyr` — 0 warnings across all 9 src files.
-- **Real-server handshake (manual, not CI):** spawned
-  `/home/macro/.cyrius/bin/cyrius-lsp` from a one-off harness;
-  observed `[cyrius-lsp] initialized` then `[cyrius-lsp]
-  shutdown` cleanly.
+- `cyrius lint src/*.cyr` — 0 warnings; `cyrfmt --check` clean; `--agnos` and `--aarch64` cross-builds pass.
+- **Real-server handshake:** cyim's `cyrius smoke`
+  (`tests/smcyr/lsp_fold.smcyr`) drives spawn + `initialize` + `stop` against
+  a real `cyrius-lsp`. **13 passed / 0 failed at v1.5.3** — it was 4 / 9 from
+  v0.2.0 through v1.5.2, which is the argv bug. That harness lives in cyim's
+  tree and is not yet a CI step there; making it one is tracked as the
+  structural half of cyim's BUG-002.
 
 ## Dependencies
 
@@ -198,23 +236,28 @@ Direct (declared in `cyrius.cyml`):
 
 | Consumer | Status |
 |---|---|
-| cyim 1.5.3+ | **planned pickup** — the cyim-lsp 1.2.1 release adds `lsp_uri_decode` to the bundle. cyim 1.5.3 picks it up + closes F-CO-4 (URL-decode for `file://` URIs). |
-| cyim 1.5.1 / 1.5.2 | shipped against cyim-lsp 1.2.0; gd/gr/refs-quickfix all work but URL-encoded paths fail. Upgrade path: bump `[deps.cyim-lsp].tag` to 1.2.1 + sync `src/plugins/lsp_glue.cyr` cross-file branches to use `lsp_uri_decode`. |
-| cyim 1.4.3 / 1.5.0 | shipped against cyim-lsp 1.1.0 reference glue (gd/gr keymap + cross-file goto-def; refs surface only count in status bar). |
-| cyim 1.4.0–1.4.2 | shipped against cyim-lsp 1.0.2/1.0.3 reference glue (gd/gr stubs; cross-file deferred). |
+| **cyim 1.9.1+** | **pickup pending** — bump `[deps.cyim-lsp].tag` to `1.5.3`. **No cyim source change needed**; the fix is entirely inside the bundle. This is what closes cyim's BUG-002 and takes its `cyrius smoke` from 4/9 to 13/13. Land the `cyrius smoke` CI gate in the same cut — it can go in green then, and not before. |
+| cyim 1.8.1 – 1.9.0 | shipped against cyim-lsp 1.5.2. Compiles and folds in cleanly; **LSP is non-functional on Linux** (BUG-002). The editor is unaffected — LSP is opt-in, and the failure is loud (`:lsp-status` reports "(not attached)"). |
+| cyim 1.6.7 – 1.8.0 | shipped against cyim-lsp 1.5.0. Same latent argv bug. |
+| cyim 1.5.3 – 1.6.6 | shipped against cyim-lsp 1.2.1 – 1.4.0 (URL-decode, reference previews). Same latent argv bug — present since v0.2.0. |
+| cyim 1.4.0 – 1.5.2 | shipped against cyim-lsp 1.0.2 – 1.2.0 reference glue. |
 | cyim 1.3.x | not applicable (no plugin pickup). |
 
 ## Next
 
-cyim 1.4.0 fold-in is the next work — copy
-`docs/examples/cyim_glue.cyr` into cyim's tree, wire
-`cyim_lsp_init()` into cyim's `main()` after `plugin_init()`,
-add `[plugins.cyim-lsp]` to cyim's `cyrius.cyml` pulling
-v1.0.2's tag.
+**Publish the 1.5.3 tag**, then cyim bumps `[deps.cyim-lsp].tag` to pick it
+up — a tag-only change on cyim's side, plus the `cyrius smoke` CI gate that
+should land in the same cut now that it passes.
 
-Beyond cyim 1.4.0 fold-in: cross-file definition jumps
-(needs cyim's `plugin-buf-load-file` ABI extension); reference
-quickfix list (needs cyim's `plugin-list-display` ABI); `gd` /
-`gr` keymap dispatch (needs cyim's `plugin-prefix-keymap`).
-None of these affect the bundle — all are consumer-glue
-extensions once cyim's ABI grows.
+Two follow-ups, neither blocking:
+
+- **The toolchain pin is stale.** `[package].cyrius` says `6.5.18`; the
+  installed wrapper and cyim are both on `6.5.35`, so every build here emits a
+  pin-drift warning. Deliberately NOT bundled into 1.5.3 — that cut is one
+  bug fix and nothing else. A toolchain-only patch is the right shape for it
+  (darshana's 0.9.1 is the precedent).
+- **A spawn test that exercises the real client path.** `subprocess.tcyr` now
+  covers argv sizing, but nothing in this repo's own suite calls
+  `lsp_client_start_default()` — the only coverage of that path is cyim's
+  smoke harness, in another tree. That asymmetry is why this bug lived in the
+  gap between two test suites for eight releases.

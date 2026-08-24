@@ -97,6 +97,49 @@ fn main() {
     assert_eq(bad_got, 0, "EOF after exec failure");
     lsp_proc_close(bad);
 
+    # ── v1.5.3 regression — spawn WITH ARGUMENTS ─────────────────────────
+    #
+    # ⭐ This is the shape that was broken from v0.2.0 through v1.5.2, and the
+    # shape no test covered. `_lsp_proc_exec` declared `var argv[4]` — FOUR
+    # BYTES for four 64-bit pointers — so every spawn overran it. The suite
+    # above missed it because it only ever spawned with arg1 = arg2 = 0, which
+    # writes 16 bytes; the failure needs `ai` to reach 2, i.e. a real argument.
+    #
+    # `lsp_client_start_default()` passes ("/usr/bin/env", "cyrius-lsp", 0) —
+    # exactly this shape — which is why LSP never started for any consumer
+    # while `/bin/cat` round-tripped happily in CI.
+    #
+    # `/usr/bin/env cat` is the mock: same stdin→stdout pass-through as
+    # `/bin/cat`, but reached through an argv that actually carries an
+    # argument. If argv is undersized, execve gets a malformed vector, the
+    # child exits 127, and the recv below reads EOF instead of the echo.
+    test_group("v1.5.3 — spawn with ONE argument round-trips (argv sizing)");
+    var pa = lsp_proc_spawn("/usr/bin/env", "cat", 0);
+    assert_neq(pa, 0, "spawn handle non-null");
+    var amsg = "argv-ok\n";
+    var alen = strlen(amsg);
+    assert_eq(lsp_proc_send(pa, amsg, alen), alen, "sent to `env cat`");
+    var abuf[16];
+    var agot = lsp_proc_recv(pa, &abuf, 16);
+    assert_eq(agot, alen, "echoed back — exec took, so argv survived");
+    assert_eq(_byte_eq(&abuf, amsg, alen), 1, "byte-equal round-trip");
+    lsp_proc_close(pa);
+
+    # Two arguments drives `ai` to 2 and the NULL terminator to offset 24 —
+    # the deepest write the argv builder can make, and the one
+    # `lsp_client_start_default` performs.
+    test_group("v1.5.3 — spawn with TWO arguments (deepest argv write)");
+    var pb = lsp_proc_spawn("/usr/bin/env", "cat", "-");
+    assert_neq(pb, 0, "spawn handle non-null");
+    var bmsg = "two-args\n";
+    var blen = strlen(bmsg);
+    assert_eq(lsp_proc_send(pb, bmsg, blen), blen, "sent to `env cat -`");
+    var bbuf[16];
+    var bgot = lsp_proc_recv(pb, &bbuf, 16);
+    assert_eq(bgot, blen, "echoed back with both args in argv");
+    assert_eq(_byte_eq(&bbuf, bmsg, blen), 1, "byte-equal round-trip");
+    lsp_proc_close(pb);
+
     return assert_summary();
 }
 
