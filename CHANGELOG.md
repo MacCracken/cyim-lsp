@@ -4,6 +4,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.5.4] - 2026-09-11
+
+### Changed
+
+- **Toolchain `6.5.18` → `6.6.2`.** No source change; the value form needed none.
+  Build, tests, and any bench/fuzz/distlib target the repo ships re-verified at the new pin.
+
+
 ## [1.5.3] — 2026-08-23
 
 **LSP starts. `var argv[4]` was sized in pointer slots, not bytes — and that

@@ -55,7 +55,7 @@ fn main() {
 
     test_group("notification builds with proper Content-Length header");
     var n = jsonrpc_build_notification("textDocument/didSave",
-                                       "{\"textDocument\":{\"uri\":\"file:///foo\"}}");
+      "{\"textDocument\":{\"uri\":\"file:///foo\"}}");
     assert_neq(n, 0, "notification non-null");
     # Frame should start with "Content-Length: "
     assert_eq(_bytes_eq(n, 0, "Content-Length: "), 1, "frame starts with Content-Length");
@@ -72,14 +72,14 @@ fn main() {
     # Body should start with `{"jsonrpc":"2.0","method":"`
     assert_eq(_bytes_eq(n, body_off,
         "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didSave\""), 1,
-        "body has the expected prefix");
+      "body has the expected prefix");
     # Body length should match what we computed
     var body_str = "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didSave\",\"params\":{\"textDocument\":{\"uri\":\"file:///foo\"}}}";
     assert_eq(body_len, strlen(body_str), "body_len matches built body");
 
     test_group("request includes the id field");
     var r = jsonrpc_build_request(42, "textDocument/definition",
-                                  "{\"line\":10}");
+      "{\"line\":10}");
     assert_neq(r, 0, "request non-null");
     var off_slot2[8];
     store64(&off_slot2, 0);
@@ -90,7 +90,7 @@ fn main() {
     var body_off2 = load64(&off_slot2);
     assert_eq(_bytes_eq(r, body_off2,
         "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\""), 1,
-        "request body starts with id field");
+      "request body starts with id field");
 
     test_group("parse_frame returns 0 on incomplete buffer (header only)");
     var partial = "Content-Length: 5\r\n";   # body missing
